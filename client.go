@@ -278,7 +278,7 @@ func (c *Client) parseEvent(line string) Event {
 	event.Type = StreamEventType(typeVal)
 
 	switch event.Type {
-	case EventMessageStart:
+	case EventMessageStart, EventAssistant:
 		if msgData, ok := raw["message"].(map[string]any); ok {
 			msgBytes, _ := json.Marshal(msgData)
 			var msg AssistantMessage
@@ -330,6 +330,11 @@ func (c *Client) parseEvent(line string) Event {
 	case EventResult:
 		var result ResultMessage
 		if err := json.Unmarshal([]byte(line), &result); err == nil {
+			// Populate convenience fields from Usage
+			if result.Usage != nil {
+				result.InputTokens = result.Usage.InputTokens
+				result.OutputTokens = result.Usage.OutputTokens
+			}
 			event.Result = &result
 		}
 	}

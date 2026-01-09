@@ -37,6 +37,8 @@ const (
 	EventToolUseEnd        StreamEventType = "tool_use_end"
 	EventToolResult        StreamEventType = "tool_result"
 	EventResult            StreamEventType = "result"
+	EventAssistant         StreamEventType = "assistant"
+	EventSystem            StreamEventType = "system"
 )
 
 // PermissionMode controls how tool permissions are handled.
@@ -174,17 +176,27 @@ type StreamDelta struct {
 	StopSequence string `json:"stop_sequence,omitempty"`
 }
 
+// ResultUsage contains token usage information.
+type ResultUsage struct {
+	InputTokens              int `json:"input_tokens,omitempty"`
+	OutputTokens             int `json:"output_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+}
+
 // ResultMessage contains the final result of a query.
 type ResultMessage struct {
-	Type         string  `json:"type"`
-	Subtype      string  `json:"subtype,omitempty"`
-	Cost         float64 `json:"cost_usd,omitempty"`
-	InputTokens  int     `json:"input_tokens,omitempty"`
-	OutputTokens int     `json:"output_tokens,omitempty"`
-	Duration     float64 `json:"duration_ms,omitempty"`
-	SessionID    string  `json:"session_id,omitempty"`
-	IsError      bool    `json:"is_error,omitempty"`
-	NumTurns     int     `json:"num_turns,omitempty"`
+	Type         string       `json:"type"`
+	Subtype      string       `json:"subtype,omitempty"`
+	Cost         float64      `json:"total_cost_usd,omitempty"`
+	Usage        *ResultUsage `json:"usage,omitempty"`
+	InputTokens  int          `json:"-"` // Populated from Usage
+	OutputTokens int          `json:"-"` // Populated from Usage
+	Duration     float64      `json:"duration_ms,omitempty"`
+	SessionID    string       `json:"session_id,omitempty"`
+	IsError      bool         `json:"is_error,omitempty"`
+	NumTurns     int          `json:"num_turns,omitempty"`
+	Result       string       `json:"result,omitempty"`
 }
 
 // Options configures the Claude agent behavior.

@@ -42,6 +42,12 @@ func main() {
 			// Print text as it streams in
 			fmt.Print(event.Text)
 
+		case claude.EventAssistant:
+			// Print text from assistant message (non-streaming mode)
+			if event.Text != "" {
+				fmt.Print(event.Text)
+			}
+
 		case claude.EventContentBlockStart:
 			if event.ToolUse != nil {
 				fmt.Printf("\n[Tool: %s]\n", event.ToolUse.Name)
