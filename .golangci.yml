@@ -31,7 +31,7 @@ linters-settings:
   gofmt:
     simplify: true
   goimports:
-    local-prefixes: github.com/character-ai/claude-agent-sdk-go
+    local-prefixes: github.com/character-tech/claude-agent-sdk-go
   misspell:
     locale: US
   exhaustive:

@@ -1,4 +1,4 @@
-module github.com/character-ai/claude-agent-sdk-go
+module github.com/character-tech/claude-agent-sdk-go
 
 go 1.23.0
 

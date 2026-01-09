@@ -9,7 +9,7 @@ import (
 	"log"
 	"time"
 
-	claude "github.com/character-ai/claude-agent-sdk-go"
+	claude "github.com/character-tech/claude-agent-sdk-go"
 )
 
 // GenerateImageInput is the input schema for image generation.
