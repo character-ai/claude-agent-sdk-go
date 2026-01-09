@@ -80,6 +80,24 @@ func (r *ToolRegistry) Has(name string) bool {
 	return ok
 }
 
+// GetHandler returns the handler for the given tool name.
+func (r *ToolRegistry) GetHandler(name string) (ToolHandler, bool) {
+	handler, ok := r.handlers[name]
+	return handler, ok
+}
+
+// Merge adds all tools from another registry.
+func (r *ToolRegistry) Merge(other *ToolRegistry) {
+	if other == nil {
+		return
+	}
+	for _, def := range other.definitions {
+		if handler, ok := other.handlers[def.Name]; ok {
+			r.Register(def, handler)
+		}
+	}
+}
+
 // ToolNotFoundError indicates a tool was not found in the registry.
 type ToolNotFoundError struct {
 	Name string

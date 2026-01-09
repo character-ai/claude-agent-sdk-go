@@ -110,6 +110,9 @@ type Event struct {
 	// For text content deltas
 	Text string
 
+	// For tool input JSON deltas
+	ToolUseDelta string
+
 	// For tool use events
 	ToolUse *ToolUseEvent
 
@@ -146,10 +149,19 @@ func (c *Client) runStreaming(ctx context.Context, args []string) (<-chan Event,
 	defer c.mu.Unlock()
 
 	if c.running {
-		return nil, fmt.Errorf("client already running")
+		return nil, ErrAlreadyRunning
 	}
 
-	cmd := exec.CommandContext(ctx, "claude", args...)
+	cliPath := c.opts.CLIPath
+	if cliPath == "" {
+		cliPath = "claude"
+	}
+
+	if _, err := exec.LookPath(cliPath); err != nil {
+		return nil, ErrCLINotFound
+	}
+
+	cmd := exec.CommandContext(ctx, cliPath, args...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -186,13 +198,11 @@ func (c *Client) streamEvents(ctx context.Context, stdout, stderr io.ReadCloser,
 		c.mu.Unlock()
 	}()
 
-	// Read stderr in background for debugging
+	stderrCh := make(chan string, 1)
 	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			// Could log stderr here if needed
-			_ = scanner.Text()
-		}
+		defer close(stderrCh)
+		data, _ := io.ReadAll(stderr)
+		stderrCh <- string(data)
 	}()
 
 	scanner := bufio.NewScanner(stdout)
@@ -224,9 +234,18 @@ func (c *Client) streamEvents(ctx context.Context, stdout, stderr io.ReadCloser,
 	if err := cmd.Wait(); err != nil {
 		// Only report if it's not a context cancellation
 		if ctx.Err() == nil {
+			stderrOutput := <-stderrCh
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode := exitErr.ExitCode()
+				events <- Event{Error: &ProcessError{ExitCode: exitCode, Stderr: stderrOutput}}
+				return
+			}
 			events <- Event{Error: fmt.Errorf("command error: %w", err)}
 		}
+		return
 	}
+
+	<-stderrCh
 }
 
 // parseEvent parses a JSON line into an Event.
@@ -236,7 +255,7 @@ func (c *Client) parseEvent(line string) Event {
 	// Try to parse as a generic JSON object first
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
-		event.Error = fmt.Errorf("failed to parse JSON: %w", err)
+		event.Error = &JSONDecodeError{Line: line, Err: err}
 		return event
 	}
 
@@ -249,18 +268,7 @@ func (c *Client) parseEvent(line string) Event {
 			var msg AssistantMessage
 			if err := json.Unmarshal([]byte(line), &msg); err == nil {
 				event.AssistantMessage = &msg
-				// Extract text from content blocks
-				if content, ok := raw["content"].([]any); ok {
-					for _, block := range content {
-						if blockMap, ok := block.(map[string]any); ok {
-							if blockMap["type"] == "text" {
-								if text, ok := blockMap["text"].(string); ok {
-									event.Text += text
-								}
-							}
-						}
-					}
-				}
+				event.Text = extractTextFromContent(msg.Content)
 			}
 			return event
 		}
@@ -276,15 +284,21 @@ func (c *Client) parseEvent(line string) Event {
 			var msg AssistantMessage
 			json.Unmarshal(msgBytes, &msg)
 			event.AssistantMessage = &msg
+			event.Text = extractTextFromContent(msg.Content)
 		}
 
 	case EventContentBlockDelta:
 		if delta, ok := raw["delta"].(map[string]any); ok {
+			if deltaType, ok := delta["type"].(string); ok && deltaType == "input_json_delta" {
+				if partialJSON, ok := delta["partial_json"].(string); ok {
+					event.ToolUseDelta = partialJSON
+				}
+				break
+			}
 			if text, ok := delta["text"].(string); ok {
 				event.Text = text
-			}
-			if partialJSON, ok := delta["partial_json"].(string); ok {
-				event.Text = partialJSON
+			} else if partialJSON, ok := delta["partial_json"].(string); ok {
+				event.ToolUseDelta = partialJSON
 			}
 		}
 
@@ -294,6 +308,14 @@ func (c *Client) parseEvent(line string) Event {
 				event.ToolUse = &ToolUseEvent{
 					ID:   getString(block, "id"),
 					Name: getString(block, "name"),
+					Input: func() json.RawMessage {
+						if input, ok := block["input"]; ok {
+							if rawInput, err := json.Marshal(input); err == nil {
+								return rawInput
+							}
+						}
+						return nil
+					}(),
 				}
 			}
 		}
@@ -328,6 +350,16 @@ func getBool(m map[string]any, key string) bool {
 		return v
 	}
 	return false
+}
+
+func extractTextFromContent(blocks []ContentBlock) string {
+	var text string
+	for _, block := range blocks {
+		if tb, ok := block.(TextBlock); ok {
+			text += tb.Text
+		}
+	}
+	return text
 }
 
 // Stop terminates the running command.

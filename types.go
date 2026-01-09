@@ -17,8 +17,9 @@ const (
 type ContentBlockType string
 
 const (
-	ContentTypeText    ContentBlockType = "text"
-	ContentTypeToolUse ContentBlockType = "tool_use"
+	ContentTypeText       ContentBlockType = "text"
+	ContentTypeToolUse    ContentBlockType = "tool_use"
+	ContentTypeToolResult ContentBlockType = "tool_result"
 )
 
 // StreamEventType represents the type of streaming event.
@@ -42,10 +43,10 @@ const (
 type PermissionMode string
 
 const (
-	PermissionDefault         PermissionMode = "default"
-	PermissionAcceptEdits     PermissionMode = "acceptEdits"
-	PermissionPlan            PermissionMode = "plan"
-	PermissionBypassAll       PermissionMode = "bypassPermissions"
+	PermissionDefault     PermissionMode = "default"
+	PermissionAcceptEdits PermissionMode = "acceptEdits"
+	PermissionPlan        PermissionMode = "plan"
+	PermissionBypassAll   PermissionMode = "bypassPermissions"
 )
 
 // ContentBlock represents a block of content in a message.
@@ -59,8 +60,8 @@ type TextBlock struct {
 	Text string `json:"text"`
 }
 
-func (TextBlock) contentBlock()              {}
-func (TextBlock) Type() ContentBlockType     { return ContentTypeText }
+func (TextBlock) contentBlock()          {}
+func (TextBlock) Type() ContentBlockType { return ContentTypeText }
 
 // ToolUseBlock represents a tool use content block.
 type ToolUseBlock struct {
@@ -72,12 +73,15 @@ type ToolUseBlock struct {
 func (ToolUseBlock) contentBlock()          {}
 func (ToolUseBlock) Type() ContentBlockType { return ContentTypeToolUse }
 
-// ToolResultBlock represents a tool result.
+// ToolResultBlock represents a tool result content block.
 type ToolResultBlock struct {
 	ToolUseID string `json:"tool_use_id"`
 	Content   string `json:"content"`
 	IsError   bool   `json:"is_error,omitempty"`
 }
+
+func (ToolResultBlock) contentBlock()          {}
+func (ToolResultBlock) Type() ContentBlockType { return ContentTypeToolResult }
 
 // Message represents a conversation message.
 type Message interface {
@@ -90,8 +94,21 @@ type UserMessage struct {
 	Content []ContentBlock `json:"content"`
 }
 
-func (UserMessage) message()        {}
+func (UserMessage) message()          {}
 func (UserMessage) Role() MessageRole { return RoleUser }
+
+// UnmarshalJSON decodes user message content blocks based on "type".
+func (m *UserMessage) UnmarshalJSON(data []byte) error {
+	type wire struct {
+		Content []json.RawMessage `json:"content"`
+	}
+	var w wire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	m.Content = parseContentBlocks(w.Content)
+	return nil
+}
 
 // AssistantMessage represents a message from Claude.
 type AssistantMessage struct {
@@ -102,8 +119,29 @@ type AssistantMessage struct {
 	StopSequence string         `json:"stop_sequence,omitempty"`
 }
 
-func (AssistantMessage) message()        {}
+func (AssistantMessage) message()          {}
 func (AssistantMessage) Role() MessageRole { return RoleAssistant }
+
+// UnmarshalJSON decodes assistant message content blocks based on "type".
+func (m *AssistantMessage) UnmarshalJSON(data []byte) error {
+	type wire struct {
+		ID           string            `json:"id,omitempty"`
+		Model        string            `json:"model,omitempty"`
+		Content      []json.RawMessage `json:"content"`
+		StopReason   string            `json:"stop_reason,omitempty"`
+		StopSequence string            `json:"stop_sequence,omitempty"`
+	}
+	var w wire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	m.ID = w.ID
+	m.Model = w.Model
+	m.Content = parseContentBlocks(w.Content)
+	m.StopReason = w.StopReason
+	m.StopSequence = w.StopSequence
+	return nil
+}
 
 // StreamEvent represents a streaming event from Claude.
 type StreamEvent struct {
@@ -138,21 +176,24 @@ type StreamDelta struct {
 
 // ResultMessage contains the final result of a query.
 type ResultMessage struct {
-	Type           string  `json:"type"`
-	Subtype        string  `json:"subtype,omitempty"`
-	Cost           float64 `json:"cost_usd,omitempty"`
-	InputTokens    int     `json:"input_tokens,omitempty"`
-	OutputTokens   int     `json:"output_tokens,omitempty"`
-	Duration       float64 `json:"duration_ms,omitempty"`
-	SessionID      string  `json:"session_id,omitempty"`
-	IsError        bool    `json:"is_error,omitempty"`
-	NumTurns       int     `json:"num_turns,omitempty"`
+	Type         string  `json:"type"`
+	Subtype      string  `json:"subtype,omitempty"`
+	Cost         float64 `json:"cost_usd,omitempty"`
+	InputTokens  int     `json:"input_tokens,omitempty"`
+	OutputTokens int     `json:"output_tokens,omitempty"`
+	Duration     float64 `json:"duration_ms,omitempty"`
+	SessionID    string  `json:"session_id,omitempty"`
+	IsError      bool    `json:"is_error,omitempty"`
+	NumTurns     int     `json:"num_turns,omitempty"`
 }
 
 // Options configures the Claude agent behavior.
 type Options struct {
 	// Working directory for the agent
 	Cwd string
+
+	// Path to the Claude CLI executable (defaults to "claude" in PATH)
+	CLIPath string
 
 	// Model to use (e.g., "claude-sonnet-4-20250514")
 	Model string
@@ -177,6 +218,9 @@ type Options struct {
 
 	// Additional CLI arguments
 	ExtraArgs []string
+
+	// MCP servers for tool integration (in-process and external)
+	MCPServers *MCPServers
 }
 
 // DefaultOptions returns sensible defaults.
@@ -185,4 +229,34 @@ func DefaultOptions() Options {
 		PermissionMode: PermissionDefault,
 		MaxTurns:       0, // unlimited
 	}
+}
+
+func parseContentBlocks(rawBlocks []json.RawMessage) []ContentBlock {
+	blocks := make([]ContentBlock, 0, len(rawBlocks))
+	for _, raw := range rawBlocks {
+		var meta struct {
+			Type ContentBlockType `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &meta); err != nil {
+			continue
+		}
+		switch meta.Type {
+		case ContentTypeText:
+			var tb TextBlock
+			if err := json.Unmarshal(raw, &tb); err == nil {
+				blocks = append(blocks, tb)
+			}
+		case ContentTypeToolUse:
+			var tb ToolUseBlock
+			if err := json.Unmarshal(raw, &tb); err == nil {
+				blocks = append(blocks, tb)
+			}
+		case ContentTypeToolResult:
+			var tb ToolResultBlock
+			if err := json.Unmarshal(raw, &tb); err == nil {
+				blocks = append(blocks, tb)
+			}
+		}
+	}
+	return blocks
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -28,22 +29,23 @@ type AgentEvent struct {
 type AgentEventType string
 
 const (
-	AgentEventMessageStart  AgentEventType = "message_start"
-	AgentEventContentDelta  AgentEventType = "content_delta"
-	AgentEventMessageEnd    AgentEventType = "message_end"
-	AgentEventToolUseStart  AgentEventType = "tool_use_start"
-	AgentEventToolUseDelta  AgentEventType = "tool_use_delta"
-	AgentEventToolUseEnd    AgentEventType = "tool_use_end"
-	AgentEventToolResult    AgentEventType = "tool_result"
-	AgentEventTurnComplete  AgentEventType = "turn_complete"
-	AgentEventError         AgentEventType = "error"
-	AgentEventComplete      AgentEventType = "complete"
+	AgentEventMessageStart AgentEventType = "message_start"
+	AgentEventContentDelta AgentEventType = "content_delta"
+	AgentEventMessageEnd   AgentEventType = "message_end"
+	AgentEventToolUseStart AgentEventType = "tool_use_start"
+	AgentEventToolUseDelta AgentEventType = "tool_use_delta"
+	AgentEventToolUseEnd   AgentEventType = "tool_use_end"
+	AgentEventToolResult   AgentEventType = "tool_result"
+	AgentEventTurnComplete AgentEventType = "turn_complete"
+	AgentEventError        AgentEventType = "error"
+	AgentEventComplete     AgentEventType = "complete"
 )
 
 // Agent orchestrates Claude with custom tools in an agentic loop.
 type Agent struct {
 	client   *Client
 	tools    *ToolRegistry
+	hooks    *Hooks
 	maxTurns int
 
 	mu       sync.Mutex
@@ -59,6 +61,9 @@ type AgentConfig struct {
 	// Custom tools
 	Tools *ToolRegistry
 
+	// Hooks for tool execution lifecycle
+	Hooks *Hooks
+
 	// Maximum turns (LLM calls) before stopping. 0 = unlimited.
 	MaxTurns int
 }
@@ -71,6 +76,7 @@ func NewAgent(cfg AgentConfig) *Agent {
 	return &Agent{
 		client:   NewClient(cfg.Options),
 		tools:    cfg.Tools,
+		hooks:    cfg.Hooks,
 		maxTurns: cfg.MaxTurns,
 	}
 }
@@ -174,10 +180,10 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 
 // ConversationMessage represents a message in the conversation history.
 type ConversationMessage struct {
-	Role       string      `json:"role"`
-	Content    string      `json:"content"`
-	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
-	ToolCallID string      `json:"tool_call_id,omitempty"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
 // streamTurn streams one LLM response and returns any tool calls.
@@ -200,6 +206,7 @@ func (a *Agent) streamTurn(
 		toolCalls        []ToolCall
 		assistantContent string
 		currentToolCall  *ToolCall
+		currentToolJSON  string
 		result           *ResultMessage
 	)
 
@@ -219,12 +226,23 @@ func (a *Agent) streamTurn(
 					Content: event.Text,
 				}
 			}
+			if event.ToolUseDelta != "" && currentToolCall != nil {
+				currentToolJSON += event.ToolUseDelta
+				events <- AgentEvent{
+					Type:    AgentEventToolUseDelta,
+					Content: event.ToolUseDelta,
+				}
+			}
 
 		case EventContentBlockStart:
 			if event.ToolUse != nil {
 				currentToolCall = &ToolCall{
 					ID:   event.ToolUse.ID,
 					Name: event.ToolUse.Name,
+				}
+				currentToolJSON = ""
+				if len(event.ToolUse.Input) > 0 {
+					currentToolJSON = string(event.ToolUse.Input)
 				}
 				events <- AgentEvent{
 					Type:     AgentEventToolUseStart,
@@ -234,12 +252,16 @@ func (a *Agent) streamTurn(
 
 		case EventContentBlockStop:
 			if currentToolCall != nil {
+				if currentToolJSON != "" {
+					currentToolCall.Input = json.RawMessage(currentToolJSON)
+				}
 				toolCalls = append(toolCalls, *currentToolCall)
 				events <- AgentEvent{
 					Type:     AgentEventToolUseEnd,
 					ToolCall: currentToolCall,
 				}
 				currentToolCall = nil
+				currentToolJSON = ""
 			}
 
 		case EventResult:
@@ -289,17 +311,53 @@ func (a *Agent) executeTools(
 		var response ToolResponse
 		response.ToolUseID = tc.ID
 
+		// Run pre-tool-use hooks
+		currentInput := tc.Input
+		if a.hooks != nil {
+			hookCtx := HookContext{
+				ToolName:  tc.Name,
+				ToolUseID: tc.ID,
+				Input:     tc.Input,
+			}
+			hookResult, _ := a.hooks.RunPreHooks(ctx, hookCtx)
+
+			switch hookResult.Decision {
+			case HookDeny:
+				response.Content = fmt.Sprintf("Tool execution denied: %s", hookResult.Reason)
+				response.IsError = true
+				events <- AgentEvent{
+					Type:         AgentEventToolResult,
+					ToolResponse: &response,
+				}
+				results = append(results, response)
+				continue
+			case HookModify:
+				currentInput = hookResult.ModifiedInput
+			}
+		}
+
+		// Execute the tool
 		if a.tools == nil || !a.tools.Has(tc.Name) {
 			response.Content = fmt.Sprintf("Tool not found: %s", tc.Name)
 			response.IsError = true
 		} else {
-			result, err := a.tools.Execute(ctx, tc.Name, tc.Input)
+			result, err := a.tools.Execute(ctx, tc.Name, currentInput)
 			if err != nil {
 				response.Content = err.Error()
 				response.IsError = true
 			} else {
 				response.Content = result
 			}
+		}
+
+		// Run post-tool-use hooks
+		if a.hooks != nil {
+			hookCtx := HookContext{
+				ToolName:  tc.Name,
+				ToolUseID: tc.ID,
+				Input:     currentInput,
+			}
+			a.hooks.RunPostHooks(ctx, hookCtx, response.Content, response.IsError)
 		}
 
 		events <- AgentEvent{
@@ -316,13 +374,39 @@ func (a *Agent) executeTools(
 // buildPrompt converts conversation history to a prompt string.
 // TODO: Replace with proper message format via CLI stdin.
 func (a *Agent) buildPrompt(history []ConversationMessage) string {
-	// For now, just use the last user message
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == "user" {
-			return history[i].Content
+	var b strings.Builder
+	for _, msg := range history {
+		switch msg.Role {
+		case "user":
+			b.WriteString("User: ")
+			b.WriteString(msg.Content)
+			b.WriteString("\n")
+		case "assistant":
+			if msg.Content != "" {
+				b.WriteString("Assistant: ")
+				b.WriteString(msg.Content)
+				b.WriteString("\n")
+			}
+			if len(msg.ToolCalls) > 0 {
+				for _, tc := range msg.ToolCalls {
+					b.WriteString("Assistant tool call: ")
+					b.WriteString(tc.Name)
+					if len(tc.Input) > 0 {
+						b.WriteString(" input=")
+						b.WriteString(string(tc.Input))
+					}
+					b.WriteString("\n")
+				}
+			}
+		case "tool":
+			b.WriteString("Tool result (")
+			b.WriteString(msg.ToolCallID)
+			b.WriteString("): ")
+			b.WriteString(msg.Content)
+			b.WriteString("\n")
 		}
 	}
-	return ""
+	return strings.TrimSpace(b.String())
 }
 
 // RunSync executes the agent and collects all text output.

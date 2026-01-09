@@ -14,6 +14,7 @@ import (
 type APIAgent struct {
 	client   anthropic.Client
 	tools    *ToolRegistry
+	hooks    *Hooks
 	model    string
 	system   string
 	maxTurns int
@@ -32,6 +33,9 @@ type APIAgentConfig struct {
 
 	// Custom tools
 	Tools *ToolRegistry
+
+	// Hooks for tool execution lifecycle
+	Hooks *Hooks
 
 	// Maximum turns before stopping (default: 10)
 	MaxTurns int
@@ -56,6 +60,7 @@ func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
 	return &APIAgent{
 		client:   client,
 		tools:    cfg.Tools,
+		hooks:    cfg.Hooks,
 		model:    cfg.Model,
 		system:   cfg.SystemPrompt,
 		maxTurns: cfg.MaxTurns,
@@ -274,17 +279,53 @@ func (a *APIAgent) executeTools(
 		var response ToolResponse
 		response.ToolUseID = tc.ID
 
+		// Run pre-tool-use hooks
+		currentInput := tc.Input
+		if a.hooks != nil {
+			hookCtx := HookContext{
+				ToolName:  tc.Name,
+				ToolUseID: tc.ID,
+				Input:     tc.Input,
+			}
+			hookResult, _ := a.hooks.RunPreHooks(ctx, hookCtx)
+
+			switch hookResult.Decision {
+			case HookDeny:
+				response.Content = fmt.Sprintf("Tool execution denied: %s", hookResult.Reason)
+				response.IsError = true
+				events <- AgentEvent{
+					Type:         AgentEventToolResult,
+					ToolResponse: &response,
+				}
+				results = append(results, response)
+				continue
+			case HookModify:
+				currentInput = hookResult.ModifiedInput
+			}
+		}
+
+		// Execute the tool
 		if a.tools == nil || !a.tools.Has(tc.Name) {
 			response.Content = fmt.Sprintf("Tool not found: %s", tc.Name)
 			response.IsError = true
 		} else {
-			result, err := a.tools.Execute(ctx, tc.Name, tc.Input)
+			result, err := a.tools.Execute(ctx, tc.Name, currentInput)
 			if err != nil {
 				response.Content = err.Error()
 				response.IsError = true
 			} else {
 				response.Content = result
 			}
+		}
+
+		// Run post-tool-use hooks
+		if a.hooks != nil {
+			hookCtx := HookContext{
+				ToolName:  tc.Name,
+				ToolUseID: tc.ID,
+				Input:     currentInput,
+			}
+			a.hooks.RunPostHooks(ctx, hookCtx, response.Content, response.IsError)
 		}
 
 		events <- AgentEvent{

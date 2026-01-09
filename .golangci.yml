@@ -1,0 +1,50 @@
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    - errcheck
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gofmt
+    - goimports
+    - misspell
+    - unconvert
+    - unparam
+    - gosec
+    - prealloc
+    - exportloopref
+    - noctx
+    - bodyclose
+    - exhaustive
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  govet:
+    enable-all: true
+  gofmt:
+    simplify: true
+  goimports:
+    local-prefixes: github.com/character-ai/claude-agent-sdk-go
+  misspell:
+    locale: US
+  exhaustive:
+    default-signifies-exhaustive: true
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+    - path: examples/
+      linters:
+        - errcheck
+        - gosec
+        - noctx
