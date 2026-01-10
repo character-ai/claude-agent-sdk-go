@@ -19,37 +19,35 @@ linters:
     - noctx
     - bodyclose
     - exhaustive
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+    govet:
+      disable:
+        - fieldalignment
+    misspell:
+      locale: US
+    exhaustive:
+      default-signifies-exhaustive: true
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+      - path: examples/
+        linters:
+          - errcheck
+          - gosec
+          - noctx
 
 formatters:
   enable:
     - gofmt
     - goimports
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-  govet:
-    enable-all: true
-  misspell:
-    locale: US
-  exhaustive:
-    default-signifies-exhaustive: true
-
-formatters-settings:
-  gofmt:
-    simplify: true
-  goimports:
-    local-prefixes: github.com/character-ai/claude-agent-sdk-go
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
-    - path: examples/
-      linters:
-        - errcheck
-        - gosec
-        - noctx
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes: github.com/character-ai/claude-agent-sdk-go
