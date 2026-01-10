@@ -5,7 +5,7 @@ A Go SDK for building agentic applications powered by Claude Code CLI.
 ## Installation
 
 ```bash
-go get github.com/character-tech/claude-agent-sdk-go
+go get github.com/character-ai/claude-agent-sdk-go
 ```
 
 **Prerequisite:** [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) must be installed and authenticated.
@@ -22,7 +22,7 @@ import (
     "fmt"
     "log"
 
-    claude "github.com/character-tech/claude-agent-sdk-go"
+    claude "github.com/character-ai/claude-agent-sdk-go"
 )
 
 func main() {

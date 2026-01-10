@@ -51,7 +51,7 @@ jobs:
 
             ## Installation
             ```bash
-            go get github.com/character-tech/claude-agent-sdk-go@${{ github.ref_name }}
+            go get github.com/character-ai/claude-agent-sdk-go@${{ github.ref_name }}
             ```
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}

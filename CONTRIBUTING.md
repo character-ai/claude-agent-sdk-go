@@ -6,7 +6,7 @@ Contributions are welcome! Here's how to get started.
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/character-tech/claude-agent-sdk-go.git
+   git clone https://github.com/character-ai/claude-agent-sdk-go.git
    cd claude-agent-sdk-go
    ```
 
