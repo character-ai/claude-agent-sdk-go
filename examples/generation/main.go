@@ -81,7 +81,7 @@ then create a short 5 second video of the scene with cherry blossoms falling.`
 
 	// Process events in real-time (like SSE to frontend)
 	for event := range events {
-		switch event.Type {
+		switch event.Type { //nolint:exhaustive // Only handling events we care about
 		case claude.AgentEventMessageStart:
 			fmt.Println("\n[Claude]")
 
@@ -97,7 +97,7 @@ then create a short 5 second video of the scene with cherry blossoms falling.`
 		case claude.AgentEventToolUseEnd:
 			if len(event.ToolCall.Input) > 0 {
 				var input map[string]any
-				json.Unmarshal(event.ToolCall.Input, &input)
+				_ = json.Unmarshal(event.ToolCall.Input, &input)
 				inputJSON, _ := json.MarshalIndent(input, "  ", "  ")
 				fmt.Printf("  Input: %s\n", inputJSON)
 			}

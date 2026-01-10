@@ -34,7 +34,7 @@ func TestSDKMCPServerAddTool(t *testing.T) {
 		var input struct {
 			Name string `json:"name"`
 		}
-		json.Unmarshal(args, &input)
+		_ = json.Unmarshal(args, &input)
 		return MCPToolResult{
 			Content: []MCPContent{TextContent("Hello, " + input.Name + "!")},
 		}, nil
@@ -59,7 +59,7 @@ func TestSDKMCPServerCallTool(t *testing.T) {
 		var input struct {
 			Message string `json:"message"`
 		}
-		json.Unmarshal(args, &input)
+		_ = json.Unmarshal(args, &input)
 		return MCPToolResult{
 			Content: []MCPContent{TextContent(input.Message)},
 		}, nil

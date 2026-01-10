@@ -137,8 +137,9 @@ func (a *APIAgent) buildTools() []anthropic.ToolUnionParam {
 		return nil
 	}
 
-	var tools []anthropic.ToolUnionParam
-	for _, def := range a.tools.Definitions() {
+	defs := a.tools.Definitions()
+	tools := make([]anthropic.ToolUnionParam, 0, len(defs))
+	for _, def := range defs {
 		tools = append(tools, anthropic.ToolUnionParam{
 			OfTool: &anthropic.ToolParam{
 				Name:        def.Name,
@@ -240,7 +241,7 @@ func (a *APIAgent) streamTurn(
 				}
 				toolCalls = append(toolCalls, tc)
 				var inputData any
-				json.Unmarshal([]byte(currentToolJSON), &inputData)
+				_ = json.Unmarshal([]byte(currentToolJSON), &inputData)
 				assistantBlocks = append(assistantBlocks, anthropic.NewToolUseBlock(
 					currentToolID, inputData, currentToolName,
 				))
@@ -289,7 +290,7 @@ func (a *APIAgent) executeTools(
 			}
 			hookResult, _ := a.hooks.RunPreHooks(ctx, hookCtx)
 
-			switch hookResult.Decision {
+			switch hookResult.Decision { //nolint:exhaustive // HookAllow is default, no action needed
 			case HookDeny:
 				response.Content = fmt.Sprintf("Tool execution denied: %s", hookResult.Reason)
 				response.IsError = true
@@ -325,7 +326,7 @@ func (a *APIAgent) executeTools(
 				ToolUseID: tc.ID,
 				Input:     currentInput,
 			}
-			a.hooks.RunPostHooks(ctx, hookCtx, response.Content, response.IsError)
+			_ = a.hooks.RunPostHooks(ctx, hookCtx, response.Content, response.IsError)
 		}
 
 		events <- AgentEvent{

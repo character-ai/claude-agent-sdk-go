@@ -37,7 +37,7 @@ func main() {
 			continue
 		}
 
-		switch event.Type {
+		switch event.Type { //nolint:exhaustive // Only handling events we care about
 		case claude.EventContentBlockDelta:
 			// Print text as it streams in
 			fmt.Print(event.Text)

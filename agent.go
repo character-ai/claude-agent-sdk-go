@@ -217,7 +217,7 @@ func (a *Agent) streamTurn(
 			return nil, assistantContent, nil, event.Error
 		}
 
-		switch event.Type {
+		switch event.Type { //nolint:exhaustive // Only handling events we care about
 		case EventContentBlockDelta:
 			if event.Text != "" {
 				assistantContent += event.Text
@@ -275,11 +275,7 @@ func (a *Agent) streamTurn(
 					assistantContent += tb.Text
 				}
 				if tu, ok := block.(ToolUseBlock); ok {
-					tc := ToolCall{
-						ID:    tu.ID,
-						Name:  tu.Name,
-						Input: tu.Input,
-					}
+					tc := ToolCall(tu)
 					toolCalls = append(toolCalls, tc)
 					events <- AgentEvent{
 						Type:     AgentEventToolUseStart,
@@ -321,7 +317,7 @@ func (a *Agent) executeTools(
 			}
 			hookResult, _ := a.hooks.RunPreHooks(ctx, hookCtx)
 
-			switch hookResult.Decision {
+			switch hookResult.Decision { //nolint:exhaustive // HookAllow is default, no action needed
 			case HookDeny:
 				response.Content = fmt.Sprintf("Tool execution denied: %s", hookResult.Reason)
 				response.IsError = true
@@ -357,7 +353,7 @@ func (a *Agent) executeTools(
 				ToolUseID: tc.ID,
 				Input:     currentInput,
 			}
-			a.hooks.RunPostHooks(ctx, hookCtx, response.Content, response.IsError)
+			_ = a.hooks.RunPostHooks(ctx, hookCtx, response.Content, response.IsError)
 		}
 
 		events <- AgentEvent{

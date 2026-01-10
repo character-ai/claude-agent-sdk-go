@@ -90,7 +90,7 @@ func TestHooksWildcard(t *testing.T) {
 		Input:     json.RawMessage(`{}`),
 	}
 
-	hooks.RunPreHooks(context.Background(), hookCtx)
+	_, _ = hooks.RunPreHooks(context.Background(), hookCtx)
 	if !called {
 		t.Fatal("wildcard hook was not called")
 	}
@@ -137,7 +137,7 @@ func TestHooksChaining(t *testing.T) {
 		Input:     json.RawMessage(`{}`),
 	}
 
-	hooks.RunPreHooks(context.Background(), hookCtx)
+	_, _ = hooks.RunPreHooks(context.Background(), hookCtx)
 	if len(order) != 2 {
 		t.Fatalf("expected 2 hooks to run, got %d", len(order))
 	}
@@ -163,7 +163,7 @@ func TestPostToolUseHook(t *testing.T) {
 		Input:     json.RawMessage(`{}`),
 	}
 
-	hooks.RunPostHooks(context.Background(), hookCtx, "tool output", false)
+	_ = hooks.RunPostHooks(context.Background(), hookCtx, "tool output", false)
 
 	if capturedResult != "tool output" {
 		t.Fatalf("unexpected result: %s", capturedResult)

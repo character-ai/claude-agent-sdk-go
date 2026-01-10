@@ -44,10 +44,7 @@ func QuerySync(ctx context.Context, prompt string, opts ...Options) (string, *Re
 			result = event.Result
 		}
 
-		// Also capture text from assistant messages
-		if event.AssistantMessage != nil && event.Type == EventMessageStart {
-			// Text already captured above via event.Text
-		}
+		// Note: text from assistant messages is already captured above via event.Text
 	}
 
 	return text, result, nil

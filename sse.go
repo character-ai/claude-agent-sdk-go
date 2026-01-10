@@ -111,10 +111,10 @@ func AgentHTTPHandler(agent *Agent) http.HandlerFunc {
 
 		events, err := agent.Run(r.Context(), prompt)
 		if err != nil {
-			sse.WriteEvent("error", map[string]string{"error": err.Error()})
+			_ = sse.WriteEvent("error", map[string]string{"error": err.Error()})
 			return
 		}
 
-		StreamAgentToSSE(events, sse)
+		_ = StreamAgentToSSE(events, sse)
 	}
 }

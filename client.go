@@ -16,7 +16,6 @@ type Client struct {
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
-	stdin   io.WriteCloser
 	stdout  io.ReadCloser
 	stderr  io.ReadCloser
 	running bool
@@ -161,7 +160,7 @@ func (c *Client) runStreaming(ctx context.Context, args []string) (<-chan Event,
 		return nil, ErrCLINotFound
 	}
 
-	cmd := exec.CommandContext(ctx, cliPath, args...)
+	cmd := exec.CommandContext(ctx, cliPath, args...) //nolint:gosec // cliPath is intentionally configurable
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -277,14 +276,15 @@ func (c *Client) parseEvent(line string) Event {
 
 	event.Type = StreamEventType(typeVal)
 
-	switch event.Type {
+	switch event.Type { //nolint:exhaustive // Only handling events we care about
 	case EventMessageStart, EventAssistant:
 		if msgData, ok := raw["message"].(map[string]any); ok {
 			msgBytes, _ := json.Marshal(msgData)
 			var msg AssistantMessage
-			json.Unmarshal(msgBytes, &msg)
-			event.AssistantMessage = &msg
-			event.Text = extractTextFromContent(msg.Content)
+			if err := json.Unmarshal(msgBytes, &msg); err == nil {
+				event.AssistantMessage = &msg
+				event.Text = extractTextFromContent(msg.Content)
+			}
 		}
 
 	case EventContentBlockDelta:
