@@ -160,7 +160,7 @@ func (c *Client) runStreaming(ctx context.Context, args []string) (<-chan Event,
 		return nil, ErrCLINotFound
 	}
 
-	cmd := exec.CommandContext(ctx, cliPath, args...) //nolint:gosec // cliPath is intentionally configurable
+	cmd := exec.CommandContext(ctx, cliPath, args...) // #nosec G204 -- cliPath is intentionally configurable
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
