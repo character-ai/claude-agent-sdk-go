@@ -12,12 +12,14 @@ import (
 // APIAgent runs agentic loops using the Anthropic API directly.
 // This is the pattern used by labs-service for custom tool flows.
 type APIAgent struct {
-	client   anthropic.Client
-	tools    *ToolRegistry
-	hooks    *Hooks
-	model    string
-	system   string
-	maxTurns int
+	client     anthropic.Client
+	tools      *ToolRegistry
+	hooks      *Hooks
+	model      string
+	system     string
+	maxTurns   int
+	canUseTool CanUseToolFunc
+	subagents  *SubagentConfig
 }
 
 // APIAgentConfig configures an API-based agent.
@@ -39,6 +41,13 @@ type APIAgentConfig struct {
 
 	// Maximum turns before stopping (default: 10)
 	MaxTurns int
+
+	// CanUseTool is called before tool execution to get permission.
+	// It is invoked before hooks.
+	CanUseTool CanUseToolFunc
+
+	// Subagents configures child agent definitions for the Task tool.
+	Subagents *SubagentConfig
 }
 
 // NewAPIAgent creates an agent that uses the Anthropic API.
@@ -57,14 +66,31 @@ func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
 		cfg.MaxTurns = 10
 	}
 
-	return &APIAgent{
-		client:   client,
-		tools:    cfg.Tools,
-		hooks:    cfg.Hooks,
-		model:    cfg.Model,
-		system:   cfg.SystemPrompt,
-		maxTurns: cfg.MaxTurns,
+	tools := cfg.Tools
+	if tools == nil {
+		tools = NewToolRegistry()
 	}
+
+	a := &APIAgent{
+		client:     client,
+		tools:      tools,
+		hooks:      cfg.Hooks,
+		model:      cfg.Model,
+		system:     cfg.SystemPrompt,
+		maxTurns:   cfg.MaxTurns,
+		canUseTool: cfg.CanUseTool,
+		subagents:  cfg.Subagents,
+	}
+
+	// Register Task tool if subagents are configured
+	if cfg.Subagents != nil {
+		registerTaskTool(a.tools, cfg.Subagents, Options{
+			Model:        cfg.Model,
+			SystemPrompt: cfg.SystemPrompt,
+		}, cfg.Hooks)
+	}
+
+	return a
 }
 
 // Run executes the agent loop and streams events.
@@ -280,13 +306,35 @@ func (a *APIAgent) executeTools(
 		var response ToolResponse
 		response.ToolUseID = tc.ID
 
-		// Run pre-tool-use hooks
+		// Check canUseTool permission callback first
 		currentInput := tc.Input
+		if a.canUseTool != nil {
+			decision := a.canUseTool(ctx, tc.Name, tc.ID, tc.Input)
+			if !decision.Allow {
+				reason := decision.Reason
+				if reason == "" {
+					reason = "permission denied"
+				}
+				response.Content = fmt.Sprintf("Tool execution denied: %s", reason)
+				response.IsError = true
+				events <- AgentEvent{
+					Type:         AgentEventToolResult,
+					ToolResponse: &response,
+				}
+				results = append(results, response)
+				continue
+			}
+			if decision.ModifiedInput != nil {
+				currentInput = decision.ModifiedInput
+			}
+		}
+
+		// Run pre-tool-use hooks
 		if a.hooks != nil {
 			hookCtx := HookContext{
 				ToolName:  tc.Name,
 				ToolUseID: tc.ID,
-				Input:     tc.Input,
+				Input:     currentInput,
 			}
 			hookResult, _ := a.hooks.RunPreHooks(ctx, hookCtx)
 

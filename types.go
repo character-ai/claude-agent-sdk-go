@@ -2,6 +2,7 @@
 package claudeagent
 
 import (
+	"context"
 	"encoding/json"
 )
 
@@ -197,6 +198,36 @@ type ResultMessage struct {
 	IsError      bool         `json:"is_error,omitempty"`
 	NumTurns     int          `json:"num_turns,omitempty"`
 	Result       string       `json:"result,omitempty"`
+	StopReason   string       `json:"stop_reason,omitempty"`
+}
+
+// PermissionDecision represents the result of a canUseTool callback.
+type PermissionDecision struct {
+	// Allow indicates whether tool execution is permitted.
+	Allow bool
+	// Reason explains the decision.
+	Reason string
+	// ModifiedInput optionally replaces the tool input.
+	ModifiedInput json.RawMessage
+}
+
+// CanUseToolFunc is a callback invoked before tool execution to get permission.
+type CanUseToolFunc func(ctx context.Context, toolName, toolUseID string, input json.RawMessage) PermissionDecision
+
+// ToolsConfig specifies which built-in tools are available.
+type ToolsConfig struct {
+	// Preset is a named tool preset (e.g., "default", "code", "all").
+	Preset string
+	// Names lists specific tool names to enable.
+	Names []string
+}
+
+// PluginConfig describes a plugin to load.
+type PluginConfig struct {
+	// Type is the plugin type (e.g., "file").
+	Type string
+	// Path is the file path for file-type plugins.
+	Path string
 }
 
 // Options configures the Claude agent behavior.
@@ -233,6 +264,36 @@ type Options struct {
 
 	// MCP servers for tool integration (in-process and external)
 	MCPServers *MCPServers
+
+	// Tools specifies which built-in tools are available (different from AllowedTools filter).
+	Tools *ToolsConfig
+
+	// CustomSessionID sets an explicit session ID instead of auto-generating one.
+	CustomSessionID string
+
+	// ForkSession creates a fork of the session specified by SessionID.
+	ForkSession bool
+
+	// Debug enables debug logging.
+	Debug bool
+
+	// DebugFile writes debug output to a file instead of stderr.
+	DebugFile string
+
+	// Betas enables beta features by name.
+	Betas []string
+
+	// AdditionalDirectories adds extra directories to the agent context.
+	AdditionalDirectories []string
+
+	// SettingSources specifies additional settings source files.
+	SettingSources []string
+
+	// Plugins configures plugins to load.
+	Plugins []PluginConfig
+
+	// EnableFileCheckpointing enables file checkpointing for session rewind.
+	EnableFileCheckpointing bool
 }
 
 // DefaultOptions returns sensible defaults.

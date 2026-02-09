@@ -15,15 +15,19 @@ This is a Go SDK for building agentic applications that interact with Claude Cod
 
 ```
 .
-├── types.go       # Core types: Messages, Events, Options, ContentBlocks
-├── client.go      # CLI client: spawns claude process, parses streaming JSON
-├── query.go       # Convenience functions: Query, QuerySync, CollectText
-├── agent.go       # CLI-based agent with tool support
-├── api_agent.go   # Direct API agent (uses anthropic-sdk-go)
-├── tools.go       # Tool registry and schema helpers
-├── sse.go         # SSE writer for HTTP streaming
-├── errors.go      # Error types
-└── examples/      # Usage examples
+├── types.go         # Core types: Messages, Events, Options, ContentBlocks, PermissionDecision
+├── client.go        # CLI client: spawns claude process, parses streaming JSON, Close/Send
+├── query.go         # Convenience functions: Query, QuerySync, CollectText
+├── agent.go         # CLI-based agent with tool support, canUseTool, subagents
+├── api_agent.go     # Direct API agent (uses anthropic-sdk-go)
+├── tools.go         # Tool registry and schema helpers
+├── hooks.go         # Hook system: matchers, regex, timeout, lifecycle events
+├── subagent.go      # Subagent definitions, SubagentConfig, Task tool registration
+├── checkpoint.go    # CheckpointManager for file rewind
+├── mcp.go           # MCP server interface, SDKMCPServer, tool annotations
+├── sse.go           # SSE writer for HTTP streaming
+├── errors.go        # Error types
+└── examples/        # Usage examples
 ```
 
 ## Key Patterns

@@ -21,9 +21,22 @@ type MCPServer interface {
 
 // MCPTool describes a tool available on an MCP server.
 type MCPTool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
+	Name        string              `json:"name"`
+	Description string              `json:"description"`
+	InputSchema map[string]any      `json:"inputSchema"`
+	Annotations *MCPToolAnnotations `json:"annotations,omitempty"`
+}
+
+// MCPToolAnnotations provides hints about a tool's behavior.
+type MCPToolAnnotations struct {
+	// ReadOnlyHint indicates the tool only reads data and has no side effects.
+	ReadOnlyHint bool `json:"readOnlyHint,omitempty"`
+	// DestructiveHint indicates the tool may cause destructive/irreversible changes.
+	DestructiveHint bool `json:"destructiveHint,omitempty"`
+	// IdempotentHint indicates calling the tool multiple times with the same input has the same effect.
+	IdempotentHint bool `json:"idempotentHint,omitempty"`
+	// OpenWorldHint indicates the tool interacts with the external world (network, filesystem, etc.).
+	OpenWorldHint bool `json:"openWorldHint,omitempty"`
 }
 
 // MCPToolResult is the result of calling an MCP tool.
@@ -98,6 +111,21 @@ func (s *SDKMCPServer) CallTool(ctx context.Context, name string, args json.RawM
 	}
 
 	return handler(ctx, args)
+}
+
+// ToolCount returns the number of registered tools.
+func (s *SDKMCPServer) ToolCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.tools)
+}
+
+// HasTool returns whether a tool with the given name is registered.
+func (s *SDKMCPServer) HasTool(name string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.handlers[name]
+	return ok
 }
 
 // AddTool registers a tool with the server.

@@ -210,3 +210,121 @@ func TestMergeToolRegistriesWithNil(t *testing.T) {
 		t.Fatal("tool1 not found")
 	}
 }
+
+func TestSDKMCPServerToolCount(t *testing.T) {
+	server := NewSDKMCPServer("test", "1.0")
+
+	if server.ToolCount() != 0 {
+		t.Fatalf("expected 0 tools, got %d", server.ToolCount())
+	}
+
+	server.AddTool(MCPTool{Name: "tool1", Description: "Tool 1"}, func(ctx context.Context, args json.RawMessage) (MCPToolResult, error) {
+		return MCPToolResult{}, nil
+	})
+
+	if server.ToolCount() != 1 {
+		t.Fatalf("expected 1 tool, got %d", server.ToolCount())
+	}
+
+	server.AddTool(MCPTool{Name: "tool2", Description: "Tool 2"}, func(ctx context.Context, args json.RawMessage) (MCPToolResult, error) {
+		return MCPToolResult{}, nil
+	})
+
+	if server.ToolCount() != 2 {
+		t.Fatalf("expected 2 tools, got %d", server.ToolCount())
+	}
+}
+
+func TestSDKMCPServerHasTool(t *testing.T) {
+	server := NewSDKMCPServer("test", "1.0")
+
+	if server.HasTool("nonexistent") {
+		t.Fatal("expected HasTool to return false for nonexistent tool")
+	}
+
+	server.AddTool(MCPTool{Name: "greet", Description: "Greet"}, func(ctx context.Context, args json.RawMessage) (MCPToolResult, error) {
+		return MCPToolResult{}, nil
+	})
+
+	if !server.HasTool("greet") {
+		t.Fatal("expected HasTool to return true for registered tool")
+	}
+	if server.HasTool("other") {
+		t.Fatal("expected HasTool to return false for unregistered tool")
+	}
+}
+
+func TestMCPToolAnnotations(t *testing.T) {
+	server := NewSDKMCPServer("test", "1.0")
+	server.AddTool(MCPTool{
+		Name:        "read_file",
+		Description: "Read a file",
+		Annotations: &MCPToolAnnotations{
+			ReadOnlyHint:    true,
+			DestructiveHint: false,
+			IdempotentHint:  true,
+			OpenWorldHint:   true,
+		},
+	}, func(ctx context.Context, args json.RawMessage) (MCPToolResult, error) {
+		return MCPToolResult{}, nil
+	})
+
+	tools := server.ListTools()
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+	if tools[0].Annotations == nil {
+		t.Fatal("expected annotations to be set")
+	}
+	if !tools[0].Annotations.ReadOnlyHint {
+		t.Fatal("expected ReadOnlyHint to be true")
+	}
+	if tools[0].Annotations.DestructiveHint {
+		t.Fatal("expected DestructiveHint to be false")
+	}
+	if !tools[0].Annotations.IdempotentHint {
+		t.Fatal("expected IdempotentHint to be true")
+	}
+	if !tools[0].Annotations.OpenWorldHint {
+		t.Fatal("expected OpenWorldHint to be true")
+	}
+}
+
+func TestAddToolFuncError(t *testing.T) {
+	server := NewSDKMCPServer("test", "1.0")
+
+	type Input struct {
+		Name string `json:"name"`
+	}
+	AddToolFunc(server, MCPTool{Name: "tool", Description: "test"}, func(ctx context.Context, args Input) (string, error) {
+		return "", nil
+	})
+
+	// Pass invalid JSON to trigger unmarshal error
+	result, err := server.CallTool(context.Background(), "tool", json.RawMessage(`invalid`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected error result for invalid input")
+	}
+}
+
+func TestMCPToolRegistryNilServers(t *testing.T) {
+	registry := NewMCPToolRegistry(nil)
+	toolReg := registry.ToToolRegistry()
+
+	if len(toolReg.Definitions()) != 0 {
+		t.Fatalf("expected 0 tools from nil servers, got %d", len(toolReg.Definitions()))
+	}
+}
+
+func TestMCPToolRegistryEmptyServers(t *testing.T) {
+	servers := NewMCPServers()
+	registry := NewMCPToolRegistry(servers)
+	toolReg := registry.ToToolRegistry()
+
+	if len(toolReg.Definitions()) != 0 {
+		t.Fatalf("expected 0 tools from empty servers, got %d", len(toolReg.Definitions()))
+	}
+}
