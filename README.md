@@ -84,7 +84,10 @@ claude.RegisterFunc(tools, claude.ToolDefinition{
         "prompt": claude.StringParam("Image description"),
         "style":  claude.EnumParam("Style", "photo", "anime", "illustration"),
     }, "prompt"),
-}, func(ctx context.Context, input ImageInput) (string, error) {
+}, func(ctx context.Context, input struct {
+    Prompt string `json:"prompt"`
+    Style  string `json:"style"`
+}) (string, error) {
     // Your image generation logic
     return `{"url": "https://example.com/image.png"}`, nil
 })
@@ -144,10 +147,10 @@ agent := claude.NewAgent(claude.AgentConfig{
 
         // Modify input for specific tools
         if toolName == "Write" {
-            modified := addSafetyHeader(input)
+            // Example: inject a safety header into the input
             return claude.PermissionDecision{
                 Allow:         true,
-                ModifiedInput: modified,
+                ModifiedInput: input, // optionally modify input here
             }
         }
 
@@ -195,9 +198,8 @@ hooks.OnAllTools().Before(func(ctx context.Context, hc claude.HookContext) claud
 
 // Modify tool input
 hooks.OnTool("Write").Before(func(ctx context.Context, hc claude.HookContext) claude.HookResult {
-    // Add a header to all written files
-    modified := addHeaderToContent(hc.Input)
-    return claude.ModifyHook(modified)
+    // Example: modify the input before execution
+    return claude.ModifyHook(hc.Input) // optionally transform hc.Input here
 })
 
 agent := claude.NewAgent(claude.AgentConfig{
@@ -242,10 +244,8 @@ Protect against slow hooks with timeout support:
 ```go
 hooks.OnTool("external_api").WithTimeout(5 * time.Second).Before(func(ctx context.Context, hc claude.HookContext) claude.HookResult {
     // If this takes longer than 5 seconds, the hook is denied with "hook timed out"
-    result := callExternalValidation(ctx, hc.Input)
-    if !result.Valid {
-        return claude.DenyHook("validation failed")
-    }
+    // Perform validation logic here (e.g., call an external service)
+    log.Printf("Validating tool input for %s", hc.ToolName)
     return claude.AllowHook()
 })
 ```
@@ -329,8 +329,8 @@ claude.RegisterFunc(researchTools, claude.ToolDefinition{
     InputSchema: claude.ObjectSchema(map[string]any{
         "query": claude.StringParam("Search query"),
     }, "query"),
-}, func(ctx context.Context, input SearchInput) (string, error) {
-    return doSearch(input.Query), nil
+}, func(ctx context.Context, input struct{ Query string `json:"query"` }) (string, error) {
+    return fmt.Sprintf("Results for: %s", input.Query), nil
 })
 
 // Define subagents

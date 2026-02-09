@@ -60,7 +60,7 @@ func TestTaskToolRegistration(t *testing.T) {
 	})
 
 	registry := NewToolRegistry()
-	registerTaskTool(registry, sc, Options{})
+	registerTaskTool(registry, sc, Options{}, nil)
 
 	if !registry.Has("Task") {
 		t.Fatal("expected Task tool to be registered")
@@ -113,7 +113,7 @@ func TestTaskToolNotFoundSubagent(t *testing.T) {
 	})
 
 	registry := NewToolRegistry()
-	registerTaskTool(registry, sc, Options{})
+	registerTaskTool(registry, sc, Options{}, nil)
 
 	// Try to invoke with a non-existent subagent
 	input := json.RawMessage(`{"description": "test", "subagent_name": "nonexistent"}`)

@@ -103,7 +103,7 @@ func NewAgent(cfg AgentConfig) *Agent {
 
 	// Register Task tool if subagents are configured
 	if cfg.Subagents != nil {
-		registerTaskTool(a.tools, cfg.Subagents, cfg.Options)
+		registerTaskTool(a.tools, cfg.Subagents, cfg.Options, cfg.Hooks)
 	}
 
 	return a
@@ -503,8 +503,14 @@ func (a *Agent) Close() error {
 }
 
 // Send writes a follow-up message to the running agent's stdin.
+// The ctx parameter is checked for cancellation before sending.
 func (a *Agent) Send(ctx context.Context, message string) error {
-	return a.client.Send(message)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return a.client.Send(message)
+	}
 }
 
 // RewindFiles rewinds file changes to a previous checkpoint.

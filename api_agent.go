@@ -85,9 +85,9 @@ func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
 	// Register Task tool if subagents are configured
 	if cfg.Subagents != nil {
 		registerTaskTool(a.tools, cfg.Subagents, Options{
-			Model:      cfg.Model,
+			Model:        cfg.Model,
 			SystemPrompt: cfg.SystemPrompt,
-		})
+		}, cfg.Hooks)
 	}
 
 	return a

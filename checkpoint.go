@@ -33,11 +33,6 @@ func (cm *CheckpointManager) RewindFiles(ctx context.Context, userMessageID stri
 		return fmt.Errorf("session ID required for file rewind")
 	}
 
-	cliPath := cm.cliPath
-	if cliPath == "" {
-		cliPath = "claude"
-	}
-
 	args := []string{
 		"checkpoint", "rewind",
 		"--session-id", cm.sessionID,
@@ -48,7 +43,7 @@ func (cm *CheckpointManager) RewindFiles(ctx context.Context, userMessageID stri
 		args = append(args, "--cwd", cm.cwd)
 	}
 
-	cmd := exec.CommandContext(ctx, cliPath, args...) // #nosec G204 -- cliPath is intentionally configurable
+	cmd := exec.CommandContext(ctx, cm.cliPath, args...) // #nosec G204 -- cliPath is intentionally configurable
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("checkpoint rewind failed: %w (output: %s)", err, string(output))

@@ -23,6 +23,7 @@ type Client struct {
 	stdout  io.ReadCloser
 	stderr  io.ReadCloser
 	running bool
+	done    chan struct{} // closed when streamEvents finishes
 }
 
 // NewClient creates a new Claude agent client.
@@ -132,84 +133,42 @@ func (c *Client) Query(ctx context.Context, prompt string) (<-chan Event, error)
 }
 
 // QueryWithMessages sends messages and returns streaming events.
-// Messages are passed via stdin as JSON for full conversation support.
+// Messages are formatted into a single prompt for the CLI.
+// For proper multi-turn conversation support with external tool execution,
+// use APIAgent which communicates directly with the Anthropic API.
 func (c *Client) QueryWithMessages(ctx context.Context, messages []Message) (<-chan Event, error) {
 	args := c.buildArgs()
 
-	// Convert messages to JSON wire format for stdin
-	type wireBlock struct {
-		Type      string          `json:"type"`
-		Text      string          `json:"text,omitempty"`
-		ID        string          `json:"id,omitempty"`
-		Name      string          `json:"name,omitempty"`
-		Input     json.RawMessage `json:"input,omitempty"`
-		ToolUseID string          `json:"tool_use_id,omitempty"`
-		Content   string          `json:"content,omitempty"`
-		IsError   bool            `json:"is_error,omitempty"`
-	}
-	type wireMessage struct {
-		Role    string      `json:"role"`
-		Content []wireBlock `json:"content"`
-	}
-
-	wireMessages := make([]wireMessage, 0, len(messages))
+	// Build a combined prompt from all messages.
+	// The CLI doesn't natively support receiving pre-built conversation history,
+	// so we format user content and tool results into a single prompt.
+	var parts []string
 	for _, msg := range messages {
-		var wm wireMessage
 		switch m := msg.(type) {
 		case UserMessage:
-			wm.Role = "user"
 			for _, block := range m.Content {
 				switch b := block.(type) {
 				case TextBlock:
-					wm.Content = append(wm.Content, wireBlock{Type: "text", Text: b.Text})
+					parts = append(parts, b.Text)
 				case ToolResultBlock:
-					wm.Content = append(wm.Content, wireBlock{
-						Type: "tool_result", ToolUseID: b.ToolUseID,
-						Content: b.Content, IsError: b.IsError,
-					})
+					prefix := "Tool result"
+					if b.IsError {
+						prefix = "Tool error"
+					}
+					parts = append(parts, fmt.Sprintf("[%s %s]: %s", prefix, b.ToolUseID, b.Content))
 				}
 			}
 		case AssistantMessage:
-			wm.Role = "assistant"
-			for _, block := range m.Content {
-				switch b := block.(type) {
-				case TextBlock:
-					wm.Content = append(wm.Content, wireBlock{Type: "text", Text: b.Text})
-				case ToolUseBlock:
-					wm.Content = append(wm.Content, wireBlock{
-						Type: "tool_use", ID: b.ID, Name: b.Name, Input: b.Input,
-					})
-				}
-			}
-		default:
-			continue
-		}
-		wireMessages = append(wireMessages, wm)
-	}
-
-	// Extract last user message as the prompt, send history via --resume-conversation-json
-	var prompt string
-	if len(wireMessages) > 0 {
-		last := wireMessages[len(wireMessages)-1]
-		if last.Role == "user" && len(last.Content) > 0 {
-			prompt = last.Content[0].Text
-			wireMessages = wireMessages[:len(wireMessages)-1]
+			// Skip assistant messages — the CLI manages its own context
 		}
 	}
 
-	if len(wireMessages) > 0 {
-		historyJSON, err := json.Marshal(wireMessages)
-		if err == nil {
-			args = append(args, "--resume-conversation-json", string(historyJSON))
-		}
+	prompt := strings.Join(parts, "\n\n")
+	if prompt == "" {
+		prompt = "continue"
 	}
 
-	if prompt != "" {
-		args = append(args, "--print", prompt)
-	} else {
-		args = append(args, "--print", "continue")
-	}
-
+	args = append(args, "--print", prompt)
 	return c.runStreaming(ctx, args)
 }
 
@@ -301,6 +260,7 @@ func (c *Client) runStreaming(ctx context.Context, args []string) (<-chan Event,
 	c.stdout = stdout
 	c.stderr = stderr
 	c.running = true
+	c.done = make(chan struct{})
 
 	events := make(chan Event, 100)
 
@@ -315,7 +275,11 @@ func (c *Client) streamEvents(ctx context.Context, stdout, stderr io.ReadCloser,
 	defer func() {
 		c.mu.Lock()
 		c.running = false
+		done := c.done
 		c.mu.Unlock()
+		if done != nil {
+			close(done)
+		}
 	}()
 
 	stderrCh := make(chan string, 1)
@@ -512,6 +476,7 @@ func (c *Client) Close() error {
 		return nil
 	}
 	proc := c.cmd.Process
+	done := c.done
 	c.mu.Unlock()
 
 	// Send SIGINT for graceful shutdown
@@ -520,13 +485,8 @@ func (c *Client) Close() error {
 		return nil
 	}
 
-	// Wait up to 5 seconds for graceful exit
-	done := make(chan struct{})
-	go func() {
-		_, _ = proc.Wait()
-		close(done)
-	}()
-
+	// Wait for streamEvents to finish (which calls cmd.Wait internally),
+	// or force kill after 5 seconds.
 	select {
 	case <-done:
 		return nil

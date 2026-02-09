@@ -50,7 +50,7 @@ type taskToolInput struct {
 }
 
 // registerTaskTool adds the "Task" tool to the registry, which dispatches to subagents.
-func registerTaskTool(registry *ToolRegistry, subagents *SubagentConfig, parentOpts Options) {
+func registerTaskTool(registry *ToolRegistry, subagents *SubagentConfig, parentOpts Options, parentHooks *Hooks) {
 	// Build description listing available subagents
 	desc := "Launch a subagent to handle a task. Available subagents:\n"
 	for name, def := range subagents.Agents {
@@ -80,12 +80,12 @@ func registerTaskTool(registry *ToolRegistry, subagents *SubagentConfig, parentO
 			return "", fmt.Errorf("subagent not found: %s", ti.SubagentName)
 		}
 
-		return runSubagent(ctx, agentDef, ti.Description, parentOpts)
+		return runSubagent(ctx, agentDef, ti.Description, parentOpts, parentHooks)
 	})
 }
 
 // runSubagent creates and runs a child agent with the given definition.
-func runSubagent(ctx context.Context, def *AgentDefinition, task string, parentOpts Options) (string, error) {
+func runSubagent(ctx context.Context, def *AgentDefinition, task string, parentOpts Options, parentHooks *Hooks) (string, error) {
 	// Determine model - use parent's if "inherit" or empty
 	model := def.Model
 	if model == "" || model == "inherit" {
@@ -107,13 +107,8 @@ func runSubagent(ctx context.Context, def *AgentDefinition, task string, parentO
 		maxTurns = 10
 	}
 
-	// Build the child prompt
-	prompt := task
-	if def.Prompt != "" {
-		prompt = def.Prompt + "\n\n" + task
-	}
-
-	// Create child agent config
+	// Create child agent config — use SystemPrompt for the subagent's prompt,
+	// and pass only the task as the user message (not duplicated in both).
 	childOpts := Options{
 		Cwd:            parentOpts.Cwd,
 		CLIPath:        parentOpts.CLIPath,
@@ -130,20 +125,20 @@ func runSubagent(ctx context.Context, def *AgentDefinition, task string, parentO
 		MaxTurns: maxTurns,
 	})
 
-	// Emit SubagentStart hook via parent hooks if available
-	if def.Hooks != nil {
-		def.Hooks.EmitEvent(ctx, HookEventData{
+	// Emit SubagentStart hook on the parent's hooks
+	if parentHooks != nil {
+		parentHooks.EmitEvent(ctx, HookEventData{
 			Event:        HookSubagentStart,
 			SubagentName: def.Name,
 			Message:      task,
 		})
 	}
 
-	result, err := child.RunSync(ctx, prompt)
+	result, err := child.RunSync(ctx, task)
 
-	// Emit SubagentStop hook
-	if def.Hooks != nil {
-		def.Hooks.EmitEvent(ctx, HookEventData{
+	// Emit SubagentStop hook on the parent's hooks
+	if parentHooks != nil {
+		parentHooks.EmitEvent(ctx, HookEventData{
 			Event:        HookSubagentStop,
 			SubagentName: def.Name,
 			Message:      result,
