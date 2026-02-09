@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 )
 
@@ -23,6 +22,11 @@ type AgentEvent struct {
 	// For completion
 	Result *ResultMessage
 	Error  error
+
+	// For subagent events - links to the parent's tool invocation
+	ParentToolUseID string
+	// SubagentName identifies which subagent produced this event
+	SubagentName string
 }
 
 // AgentEventType categorizes agent events.
@@ -43,10 +47,12 @@ const (
 
 // Agent orchestrates Claude with custom tools in an agentic loop.
 type Agent struct {
-	client   *Client
-	tools    *ToolRegistry
-	hooks    *Hooks
-	maxTurns int
+	client     *Client
+	tools      *ToolRegistry
+	hooks      *Hooks
+	maxTurns   int
+	canUseTool CanUseToolFunc
+	subagents  *SubagentConfig
 
 	mu       sync.Mutex
 	running  bool
@@ -66,6 +72,13 @@ type AgentConfig struct {
 
 	// Maximum turns (LLM calls) before stopping. 0 = unlimited.
 	MaxTurns int
+
+	// CanUseTool is called before tool execution to get permission.
+	// It is invoked before hooks.
+	CanUseTool CanUseToolFunc
+
+	// Subagents configures child agent definitions for the Task tool.
+	Subagents *SubagentConfig
 }
 
 // NewAgent creates an Agent with the given configuration.
@@ -73,12 +86,27 @@ func NewAgent(cfg AgentConfig) *Agent {
 	if cfg.MaxTurns == 0 {
 		cfg.MaxTurns = 10 // sensible default
 	}
-	return &Agent{
-		client:   NewClient(cfg.Options),
-		tools:    cfg.Tools,
-		hooks:    cfg.Hooks,
-		maxTurns: cfg.MaxTurns,
+
+	tools := cfg.Tools
+	if tools == nil {
+		tools = NewToolRegistry()
 	}
+
+	a := &Agent{
+		client:     NewClient(cfg.Options),
+		tools:      tools,
+		hooks:      cfg.Hooks,
+		maxTurns:   cfg.MaxTurns,
+		canUseTool: cfg.CanUseTool,
+		subagents:  cfg.Subagents,
+	}
+
+	// Register Task tool if subagents are configured
+	if cfg.Subagents != nil {
+		registerTaskTool(a.tools, cfg.Subagents, cfg.Options)
+	}
+
+	return a
 }
 
 // Run executes the agent loop with the given prompt.
@@ -118,7 +146,22 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 		a.mu.Lock()
 		a.running = false
 		a.mu.Unlock()
+		// Emit session end hook
+		if a.hooks != nil {
+			a.hooks.EmitEvent(ctx, HookEventData{
+				Event:   HookSessionEnd,
+				Message: "agent session ended",
+			})
+		}
 	}()
+
+	// Emit session start hook
+	if a.hooks != nil {
+		a.hooks.EmitEvent(ctx, HookEventData{
+			Event:   HookSessionStart,
+			Message: "agent session started",
+		})
+	}
 
 	// Build conversation history
 	history := []ConversationMessage{
@@ -142,6 +185,9 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 
 		// No tool calls = we're done
 		if len(toolCalls) == 0 {
+			if result != nil && result.StopReason == "" {
+				result.StopReason = "end_turn"
+			}
 			events <- AgentEvent{
 				Type:   AgentEventComplete,
 				Result: result,
@@ -172,6 +218,12 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 	}
 
 	// Max turns reached
+	if a.hooks != nil {
+		a.hooks.EmitEvent(ctx, HookEventData{
+			Event:   HookStop,
+			Message: fmt.Sprintf("max turns (%d) reached", a.maxTurns),
+		})
+	}
 	events <- AgentEvent{
 		Type:  AgentEventError,
 		Error: fmt.Errorf("max turns (%d) reached", a.maxTurns),
@@ -193,11 +245,9 @@ func (a *Agent) streamTurn(
 	events chan<- AgentEvent,
 ) ([]ToolCall, string, *ResultMessage, error) {
 
-	// Convert history to prompt for now
-	// TODO: Use proper message format via CLI stdin
-	prompt := a.buildPrompt(history)
-
-	cliEvents, err := a.client.Query(ctx, prompt)
+	// Convert history to Messages for proper CLI communication
+	messages := a.historyToMessages(history)
+	cliEvents, err := a.client.QueryWithMessages(ctx, messages)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -307,13 +357,35 @@ func (a *Agent) executeTools(
 		var response ToolResponse
 		response.ToolUseID = tc.ID
 
-		// Run pre-tool-use hooks
+		// Check canUseTool permission callback first
 		currentInput := tc.Input
+		if a.canUseTool != nil {
+			decision := a.canUseTool(ctx, tc.Name, tc.ID, tc.Input)
+			if !decision.Allow {
+				reason := decision.Reason
+				if reason == "" {
+					reason = "permission denied"
+				}
+				response.Content = fmt.Sprintf("Tool execution denied: %s", reason)
+				response.IsError = true
+				events <- AgentEvent{
+					Type:         AgentEventToolResult,
+					ToolResponse: &response,
+				}
+				results = append(results, response)
+				continue
+			}
+			if decision.ModifiedInput != nil {
+				currentInput = decision.ModifiedInput
+			}
+		}
+
+		// Run pre-tool-use hooks
 		if a.hooks != nil {
 			hookCtx := HookContext{
 				ToolName:  tc.Name,
 				ToolUseID: tc.ID,
-				Input:     tc.Input,
+				Input:     currentInput,
 			}
 			hookResult, _ := a.hooks.RunPreHooks(ctx, hookCtx)
 
@@ -367,42 +439,38 @@ func (a *Agent) executeTools(
 	return results
 }
 
-// buildPrompt converts conversation history to a prompt string.
-// TODO: Replace with proper message format via CLI stdin.
-func (a *Agent) buildPrompt(history []ConversationMessage) string {
-	var b strings.Builder
+// historyToMessages converts conversation history to Message types for CLI communication.
+func (a *Agent) historyToMessages(history []ConversationMessage) []Message {
+	messages := make([]Message, 0, len(history))
 	for _, msg := range history {
 		switch msg.Role {
 		case "user":
-			b.WriteString("User: ")
-			b.WriteString(msg.Content)
-			b.WriteString("\n")
+			messages = append(messages, UserMessage{
+				Content: []ContentBlock{TextBlock{Text: msg.Content}},
+			})
 		case "assistant":
+			var blocks []ContentBlock
 			if msg.Content != "" {
-				b.WriteString("Assistant: ")
-				b.WriteString(msg.Content)
-				b.WriteString("\n")
+				blocks = append(blocks, TextBlock{Text: msg.Content})
 			}
-			if len(msg.ToolCalls) > 0 {
-				for _, tc := range msg.ToolCalls {
-					b.WriteString("Assistant tool call: ")
-					b.WriteString(tc.Name)
-					if len(tc.Input) > 0 {
-						b.WriteString(" input=")
-						b.WriteString(string(tc.Input))
-					}
-					b.WriteString("\n")
-				}
+			for _, tc := range msg.ToolCalls {
+				blocks = append(blocks, ToolUseBlock{
+					ID:    tc.ID,
+					Name:  tc.Name,
+					Input: tc.Input,
+				})
 			}
+			messages = append(messages, AssistantMessage{Content: blocks})
 		case "tool":
-			b.WriteString("Tool result (")
-			b.WriteString(msg.ToolCallID)
-			b.WriteString("): ")
-			b.WriteString(msg.Content)
-			b.WriteString("\n")
+			messages = append(messages, UserMessage{
+				Content: []ContentBlock{ToolResultBlock{
+					ToolUseID: msg.ToolCallID,
+					Content:   msg.Content,
+				}},
+			})
 		}
 	}
-	return strings.TrimSpace(b.String())
+	return messages
 }
 
 // RunSync executes the agent and collects all text output.
@@ -422,6 +490,32 @@ func (a *Agent) RunSync(ctx context.Context, prompt string) (string, error) {
 		}
 	}
 	return content, nil
+}
+
+// Close gracefully shuts down the agent, sending SIGINT then SIGKILL after timeout.
+func (a *Agent) Close() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.cancelFn != nil {
+		a.cancelFn()
+	}
+	return a.client.Close()
+}
+
+// Send writes a follow-up message to the running agent's stdin.
+func (a *Agent) Send(ctx context.Context, message string) error {
+	return a.client.Send(message)
+}
+
+// RewindFiles rewinds file changes to a previous checkpoint.
+// Requires EnableFileCheckpointing to be set in Options.
+func (a *Agent) RewindFiles(ctx context.Context, userMessageID string) error {
+	cm := &CheckpointManager{
+		sessionID: a.client.opts.SessionID,
+		cliPath:   a.client.opts.CLIPath,
+		cwd:       a.client.opts.Cwd,
+	}
+	return cm.RewindFiles(ctx, userMessageID)
 }
 
 // MarshalToolInput is a helper to marshal tool input to JSON.

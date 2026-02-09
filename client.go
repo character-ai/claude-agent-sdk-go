@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
+	"syscall"
+	"time"
 )
 
 // Client provides a streaming interface to Claude Code CLI.
@@ -16,6 +19,7 @@ type Client struct {
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
+	stdin   io.WriteCloser
 	stdout  io.ReadCloser
 	stderr  io.ReadCloser
 	running bool
@@ -67,6 +71,53 @@ func (c *Client) buildArgs() []string {
 		args = append(args, "--continue", c.opts.SessionID)
 	}
 
+	if c.opts.Tools != nil {
+		if c.opts.Tools.Preset != "" {
+			args = append(args, "--tools", c.opts.Tools.Preset)
+		}
+		for _, name := range c.opts.Tools.Names {
+			args = append(args, "--tools", name)
+		}
+	}
+
+	if c.opts.CustomSessionID != "" {
+		args = append(args, "--session-id", c.opts.CustomSessionID)
+	}
+
+	if c.opts.ForkSession {
+		args = append(args, "--fork-session")
+	}
+
+	if c.opts.Debug {
+		args = append(args, "--debug")
+	}
+
+	if c.opts.DebugFile != "" {
+		args = append(args, "--debug-file", c.opts.DebugFile)
+	}
+
+	for _, beta := range c.opts.Betas {
+		args = append(args, "--beta", beta)
+	}
+
+	for _, dir := range c.opts.AdditionalDirectories {
+		args = append(args, "--additional-directory", dir)
+	}
+
+	if len(c.opts.SettingSources) > 0 {
+		args = append(args, "--setting-sources", strings.Join(c.opts.SettingSources, ","))
+	}
+
+	for _, plugin := range c.opts.Plugins {
+		if plugin.Path != "" {
+			args = append(args, "--plugin", plugin.Path)
+		}
+	}
+
+	if c.opts.EnableFileCheckpointing {
+		args = append(args, "--enable-file-checkpointing")
+	}
+
 	args = append(args, c.opts.ExtraArgs...)
 
 	return args
@@ -81,21 +132,85 @@ func (c *Client) Query(ctx context.Context, prompt string) (<-chan Event, error)
 }
 
 // QueryWithMessages sends messages and returns streaming events.
+// Messages are passed via stdin as JSON for full conversation support.
 func (c *Client) QueryWithMessages(ctx context.Context, messages []Message) (<-chan Event, error) {
-	// For now, convert to a simple prompt
-	// TODO: Support full message history via stdin
-	var prompt string
+	args := c.buildArgs()
+
+	// Convert messages to JSON wire format for stdin
+	type wireBlock struct {
+		Type      string          `json:"type"`
+		Text      string          `json:"text,omitempty"`
+		ID        string          `json:"id,omitempty"`
+		Name      string          `json:"name,omitempty"`
+		Input     json.RawMessage `json:"input,omitempty"`
+		ToolUseID string          `json:"tool_use_id,omitempty"`
+		Content   string          `json:"content,omitempty"`
+		IsError   bool            `json:"is_error,omitempty"`
+	}
+	type wireMessage struct {
+		Role    string      `json:"role"`
+		Content []wireBlock `json:"content"`
+	}
+
+	wireMessages := make([]wireMessage, 0, len(messages))
 	for _, msg := range messages {
-		if um, ok := msg.(UserMessage); ok {
-			for _, block := range um.Content {
-				if tb, ok := block.(TextBlock); ok {
-					prompt += tb.Text + "\n"
+		var wm wireMessage
+		switch m := msg.(type) {
+		case UserMessage:
+			wm.Role = "user"
+			for _, block := range m.Content {
+				switch b := block.(type) {
+				case TextBlock:
+					wm.Content = append(wm.Content, wireBlock{Type: "text", Text: b.Text})
+				case ToolResultBlock:
+					wm.Content = append(wm.Content, wireBlock{
+						Type: "tool_result", ToolUseID: b.ToolUseID,
+						Content: b.Content, IsError: b.IsError,
+					})
 				}
 			}
+		case AssistantMessage:
+			wm.Role = "assistant"
+			for _, block := range m.Content {
+				switch b := block.(type) {
+				case TextBlock:
+					wm.Content = append(wm.Content, wireBlock{Type: "text", Text: b.Text})
+				case ToolUseBlock:
+					wm.Content = append(wm.Content, wireBlock{
+						Type: "tool_use", ID: b.ID, Name: b.Name, Input: b.Input,
+					})
+				}
+			}
+		default:
+			continue
+		}
+		wireMessages = append(wireMessages, wm)
+	}
+
+	// Extract last user message as the prompt, send history via --resume-conversation-json
+	var prompt string
+	if len(wireMessages) > 0 {
+		last := wireMessages[len(wireMessages)-1]
+		if last.Role == "user" && len(last.Content) > 0 {
+			prompt = last.Content[0].Text
+			wireMessages = wireMessages[:len(wireMessages)-1]
 		}
 	}
 
-	return c.Query(ctx, prompt)
+	if len(wireMessages) > 0 {
+		historyJSON, err := json.Marshal(wireMessages)
+		if err == nil {
+			args = append(args, "--resume-conversation-json", string(historyJSON))
+		}
+	}
+
+	if prompt != "" {
+		args = append(args, "--print", prompt)
+	} else {
+		args = append(args, "--print", "continue")
+	}
+
+	return c.runStreaming(ctx, args)
 }
 
 // Event represents a parsed event from the stream.
@@ -162,6 +277,11 @@ func (c *Client) runStreaming(ctx context.Context, args []string) (<-chan Event,
 
 	cmd := exec.CommandContext(ctx, cliPath, args...) // #nosec G204 -- cliPath is intentionally configurable
 
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stdin pipe: %w", err)
+	}
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get stdout pipe: %w", err)
@@ -177,6 +297,7 @@ func (c *Client) runStreaming(ctx context.Context, args []string) (<-chan Event,
 	}
 
 	c.cmd = cmd
+	c.stdin = stdin
 	c.stdout = stdout
 	c.stderr = stderr
 	c.running = true
@@ -367,7 +488,7 @@ func extractTextFromContent(blocks []ContentBlock) string {
 	return text
 }
 
-// Stop terminates the running command.
+// Stop terminates the running command immediately with SIGKILL.
 func (c *Client) Stop() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -380,6 +501,53 @@ func (c *Client) Stop() error {
 		return c.cmd.Process.Kill()
 	}
 	return nil
+}
+
+// Close gracefully shuts down the running command.
+// It sends SIGINT first, then SIGKILL after a 5-second timeout.
+func (c *Client) Close() error {
+	c.mu.Lock()
+	if !c.running || c.cmd == nil || c.cmd.Process == nil {
+		c.mu.Unlock()
+		return nil
+	}
+	proc := c.cmd.Process
+	c.mu.Unlock()
+
+	// Send SIGINT for graceful shutdown
+	if err := proc.Signal(syscall.SIGINT); err != nil {
+		// Process may have already exited
+		return nil
+	}
+
+	// Wait up to 5 seconds for graceful exit
+	done := make(chan struct{})
+	go func() {
+		_, _ = proc.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-time.After(5 * time.Second):
+		// Force kill after timeout
+		return proc.Kill()
+	}
+}
+
+// Send writes data to the running process's stdin.
+// This can be used to send follow-up messages to a running query.
+func (c *Client) Send(data string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.running || c.stdin == nil {
+		return ErrNotRunning
+	}
+
+	_, err := fmt.Fprintln(c.stdin, data)
+	return err
 }
 
 // IsRunning returns whether a query is currently running.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestHooksAllow(t *testing.T) {
@@ -170,5 +171,165 @@ func TestPostToolUseHook(t *testing.T) {
 	}
 	if capturedIsError {
 		t.Fatal("expected isError to be false")
+	}
+}
+
+func TestHooksRegexMatcher(t *testing.T) {
+	called := false
+	hooks := NewHooks()
+	hooks.OnToolRegex(`^mcp__.*`).Before(func(ctx context.Context, hookCtx HookContext) HookResult {
+		called = true
+		return AllowHook()
+	})
+
+	hookCtx := HookContext{
+		ToolName:  "mcp__server__tool",
+		ToolUseID: "123",
+		Input:     json.RawMessage(`{}`),
+	}
+
+	_, _ = hooks.RunPreHooks(context.Background(), hookCtx)
+	if !called {
+		t.Fatal("regex hook was not called for matching tool")
+	}
+}
+
+func TestHooksRegexNoMatch(t *testing.T) {
+	called := false
+	hooks := NewHooks()
+	hooks.OnToolRegex(`^mcp__.*`).Before(func(ctx context.Context, hookCtx HookContext) HookResult {
+		called = true
+		return AllowHook()
+	})
+
+	hookCtx := HookContext{
+		ToolName:  "Bash",
+		ToolUseID: "123",
+		Input:     json.RawMessage(`{}`),
+	}
+
+	_, _ = hooks.RunPreHooks(context.Background(), hookCtx)
+	if called {
+		t.Fatal("regex hook should not match non-matching tool")
+	}
+}
+
+func TestHooksTimeout(t *testing.T) {
+	hooks := NewHooks()
+	hooks.OnTool("slow").WithTimeout(50 * time.Millisecond).Before(func(ctx context.Context, hookCtx HookContext) HookResult {
+		// Simulate a slow hook
+		select {
+		case <-time.After(500 * time.Millisecond):
+			return AllowHook()
+		case <-ctx.Done():
+			return DenyHook("context cancelled")
+		}
+	})
+
+	hookCtx := HookContext{
+		ToolName:  "slow",
+		ToolUseID: "123",
+		Input:     json.RawMessage(`{}`),
+	}
+
+	result, err := hooks.RunPreHooks(context.Background(), hookCtx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Decision != HookDeny {
+		t.Fatalf("expected deny from timeout, got %s", result.Decision)
+	}
+	if result.Reason != "hook timed out" {
+		t.Fatalf("expected 'hook timed out' reason, got: %s", result.Reason)
+	}
+}
+
+func TestHooksEventHandler(t *testing.T) {
+	var capturedEvent HookEventData
+	hooks := NewHooks()
+	hooks.OnEvent(HookSessionStart, func(ctx context.Context, data HookEventData) {
+		capturedEvent = data
+	})
+
+	hooks.EmitEvent(context.Background(), HookEventData{
+		Event:   HookSessionStart,
+		Message: "test session",
+	})
+
+	if capturedEvent.Event != HookSessionStart {
+		t.Fatalf("expected SessionStart event, got %s", capturedEvent.Event)
+	}
+	if capturedEvent.Message != "test session" {
+		t.Fatalf("expected 'test session' message, got %s", capturedEvent.Message)
+	}
+}
+
+func TestHooksEventHandlerNoMatch(t *testing.T) {
+	called := false
+	hooks := NewHooks()
+	hooks.OnEvent(HookSessionStart, func(ctx context.Context, data HookEventData) {
+		called = true
+	})
+
+	// Emit a different event
+	hooks.EmitEvent(context.Background(), HookEventData{
+		Event:   HookSessionEnd,
+		Message: "session ended",
+	})
+
+	if called {
+		t.Fatal("SessionStart handler should not be called for SessionEnd event")
+	}
+}
+
+func TestHooksPostToolFailureEvent(t *testing.T) {
+	var capturedFailure HookEventData
+	hooks := NewHooks()
+	hooks.OnEvent(HookPostToolUseFailure, func(ctx context.Context, data HookEventData) {
+		capturedFailure = data
+	})
+
+	hookCtx := HookContext{
+		ToolName:  "failing_tool",
+		ToolUseID: "456",
+		Input:     json.RawMessage(`{}`),
+	}
+
+	_ = hooks.RunPostHooks(context.Background(), hookCtx, "some error occurred", true)
+
+	if capturedFailure.Event != HookPostToolUseFailure {
+		t.Fatalf("expected PostToolUseFailure event, got %s", capturedFailure.Event)
+	}
+	if capturedFailure.ToolName != "failing_tool" {
+		t.Fatalf("expected tool name 'failing_tool', got %s", capturedFailure.ToolName)
+	}
+	if capturedFailure.Error != "some error occurred" {
+		t.Fatalf("expected error message, got %s", capturedFailure.Error)
+	}
+}
+
+func TestHooksEmitEventNilSafe(t *testing.T) {
+	// Should not panic on nil hooks
+	var hooks *Hooks
+	hooks.EmitEvent(context.Background(), HookEventData{Event: HookSessionStart})
+}
+
+func TestHooksEnhancedResult(t *testing.T) {
+	result := HookResult{
+		Decision:          HookAllow,
+		AdditionalContext: "extra context",
+		SystemMessage:     "system instruction",
+		Continue:          true,
+		SuppressOutput:    false,
+	}
+
+	if result.AdditionalContext != "extra context" {
+		t.Fatalf("expected additional context")
+	}
+	if result.SystemMessage != "system instruction" {
+		t.Fatalf("expected system message")
+	}
+	if !result.Continue {
+		t.Fatalf("expected continue to be true")
 	}
 }
