@@ -304,7 +304,7 @@ func TestAgentSendCancelledContext(t *testing.T) {
 
 	err := agent.Send(ctx, "test")
 	if err == nil {
-		t.Fatal("expected error for cancelled context")
+		t.Fatal("expected error for canceled context")
 	}
 	if err != context.Canceled {
 		t.Fatalf("expected context.Canceled, got: %v", err)

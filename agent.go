@@ -454,11 +454,7 @@ func (a *Agent) historyToMessages(history []ConversationMessage) []Message {
 				blocks = append(blocks, TextBlock{Text: msg.Content})
 			}
 			for _, tc := range msg.ToolCalls {
-				blocks = append(blocks, ToolUseBlock{
-					ID:    tc.ID,
-					Name:  tc.Name,
-					Input: tc.Input,
-				})
+				blocks = append(blocks, ToolUseBlock(tc))
 			}
 			messages = append(messages, AssistantMessage{Content: blocks})
 		case "tool":

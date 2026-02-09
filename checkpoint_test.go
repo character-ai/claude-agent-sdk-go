@@ -1,6 +1,9 @@
 package claudeagent
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 func TestNewCheckpointManager(t *testing.T) {
 	cm := NewCheckpointManager("sess-123", "/usr/bin/claude", "/tmp")
@@ -27,7 +30,7 @@ func TestNewCheckpointManagerDefaultCLIPath(t *testing.T) {
 func TestCheckpointManagerRewindFilesRequiresSessionID(t *testing.T) {
 	cm := NewCheckpointManager("", "", "")
 
-	err := cm.RewindFiles(nil, "msg-123")
+	err := cm.RewindFiles(context.TODO(), "msg-123")
 	if err == nil {
 		t.Fatal("expected error when session ID is empty")
 	}

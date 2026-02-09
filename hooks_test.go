@@ -222,7 +222,7 @@ func TestHooksTimeout(t *testing.T) {
 		case <-time.After(500 * time.Millisecond):
 			return AllowHook()
 		case <-ctx.Done():
-			return DenyHook("context cancelled")
+			return DenyHook("context canceled")
 		}
 	})
 
