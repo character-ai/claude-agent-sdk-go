@@ -30,23 +30,41 @@ type ToolResponse struct {
 type ToolHandler func(ctx context.Context, input json.RawMessage) (string, error)
 
 // ToolRegistry maps tool names to their handlers.
+// Internally backed by a Store for indexed lookups and thread-safe access.
 type ToolRegistry struct {
-	definitions []ToolDefinition
-	handlers    map[string]ToolHandler
+	store *Store
 }
 
 // NewToolRegistry creates a new tool registry.
 func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{
-		definitions: make([]ToolDefinition, 0),
-		handlers:    make(map[string]ToolHandler),
+		store: NewStore(),
 	}
 }
 
-// Register adds a tool to the registry.
+// NewToolRegistryWithStore creates a tool registry sharing the given store.
+func NewToolRegistryWithStore(store *Store) *ToolRegistry {
+	return &ToolRegistry{store: store}
+}
+
+// Store returns the underlying store for cross-component queries.
+func (r *ToolRegistry) Store() *Store {
+	return r.store
+}
+
+// Register adds a tool to the registry with Source="native".
 func (r *ToolRegistry) Register(def ToolDefinition, handler ToolHandler) {
-	r.definitions = append(r.definitions, def)
-	r.handlers[def.Name] = handler
+	r.RegisterWithSource(def, handler, "native", nil)
+}
+
+// RegisterWithSource adds a tool with an explicit source and tags.
+func (r *ToolRegistry) RegisterWithSource(def ToolDefinition, handler ToolHandler, source string, tags []string) {
+	_ = r.store.InsertTool(&StoredTool{
+		ToolDefinition: def,
+		Source:         source,
+		Tags:           tags,
+		Handler:        handler,
+	})
 }
 
 // RegisterFunc is a convenience method for registering a tool with a typed handler.
@@ -62,28 +80,42 @@ func RegisterFunc[T any](r *ToolRegistry, def ToolDefinition, handler func(ctx c
 
 // Definitions returns all registered tool definitions.
 func (r *ToolRegistry) Definitions() []ToolDefinition {
-	return r.definitions
+	tools, err := r.store.ListTools()
+	if err != nil {
+		return nil
+	}
+	defs := make([]ToolDefinition, 0, len(tools))
+	for _, t := range tools {
+		defs = append(defs, t.ToolDefinition)
+	}
+	return defs
 }
 
 // Execute runs a tool by name with the given input.
 func (r *ToolRegistry) Execute(ctx context.Context, name string, input json.RawMessage) (string, error) {
-	handler, ok := r.handlers[name]
-	if !ok {
+	tool, err := r.store.GetTool(name)
+	if err != nil || tool == nil {
 		return "", &ToolNotFoundError{Name: name}
 	}
-	return handler(ctx, input)
+	if tool.Handler == nil {
+		return "", &ToolNotFoundError{Name: name}
+	}
+	return tool.Handler(ctx, input)
 }
 
 // Has checks if a tool is registered.
 func (r *ToolRegistry) Has(name string) bool {
-	_, ok := r.handlers[name]
-	return ok
+	tool, err := r.store.GetTool(name)
+	return err == nil && tool != nil
 }
 
 // GetHandler returns the handler for the given tool name.
 func (r *ToolRegistry) GetHandler(name string) (ToolHandler, bool) {
-	handler, ok := r.handlers[name]
-	return handler, ok
+	tool, err := r.store.GetTool(name)
+	if err != nil || tool == nil {
+		return nil, false
+	}
+	return tool.Handler, tool.Handler != nil
 }
 
 // Merge adds all tools from another registry.
@@ -91,11 +123,31 @@ func (r *ToolRegistry) Merge(other *ToolRegistry) {
 	if other == nil {
 		return
 	}
-	for _, def := range other.definitions {
-		if handler, ok := other.handlers[def.Name]; ok {
-			r.Register(def, handler)
-		}
+	tools, err := other.store.ListTools()
+	if err != nil {
+		return
 	}
+	for _, t := range tools {
+		_ = r.store.InsertTool(t)
+	}
+}
+
+// Remove deletes a tool from the registry by name.
+func (r *ToolRegistry) Remove(name string) {
+	_ = r.store.DeleteTool(name)
+}
+
+// ToolsByTag returns tool definitions matching the given tag.
+func (r *ToolRegistry) ToolsByTag(tag string) []ToolDefinition {
+	tools, err := r.store.ListToolsByTag(tag)
+	if err != nil {
+		return nil
+	}
+	defs := make([]ToolDefinition, 0, len(tools))
+	for _, t := range tools {
+		defs = append(defs, t.ToolDefinition)
+	}
+	return defs
 }
 
 // ToolNotFoundError indicates a tool was not found in the registry.

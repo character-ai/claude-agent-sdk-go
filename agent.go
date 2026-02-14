@@ -33,26 +33,29 @@ type AgentEvent struct {
 type AgentEventType string
 
 const (
-	AgentEventMessageStart AgentEventType = "message_start"
-	AgentEventContentDelta AgentEventType = "content_delta"
-	AgentEventMessageEnd   AgentEventType = "message_end"
-	AgentEventToolUseStart AgentEventType = "tool_use_start"
-	AgentEventToolUseDelta AgentEventType = "tool_use_delta"
-	AgentEventToolUseEnd   AgentEventType = "tool_use_end"
-	AgentEventToolResult   AgentEventType = "tool_result"
-	AgentEventTurnComplete AgentEventType = "turn_complete"
-	AgentEventError        AgentEventType = "error"
-	AgentEventComplete     AgentEventType = "complete"
+	AgentEventMessageStart   AgentEventType = "message_start"
+	AgentEventContentDelta   AgentEventType = "content_delta"
+	AgentEventMessageEnd     AgentEventType = "message_end"
+	AgentEventToolUseStart   AgentEventType = "tool_use_start"
+	AgentEventToolUseDelta   AgentEventType = "tool_use_delta"
+	AgentEventToolUseEnd     AgentEventType = "tool_use_end"
+	AgentEventToolResult     AgentEventType = "tool_result"
+	AgentEventTurnComplete   AgentEventType = "turn_complete"
+	AgentEventError          AgentEventType = "error"
+	AgentEventComplete       AgentEventType = "complete"
+	AgentEventSkillsSelected AgentEventType = "skills_selected"
 )
 
 // Agent orchestrates Claude with custom tools in an agentic loop.
 type Agent struct {
-	client     *Client
-	tools      *ToolRegistry
-	hooks      *Hooks
-	maxTurns   int
-	canUseTool CanUseToolFunc
-	subagents  *SubagentConfig
+	client         *Client
+	tools          *ToolRegistry
+	hooks          *Hooks
+	maxTurns       int
+	canUseTool     CanUseToolFunc
+	subagents      *SubagentConfig
+	skills         *SkillRegistry
+	contextBuilder *ContextBuilder
 
 	mu       sync.Mutex
 	running  bool
@@ -79,6 +82,13 @@ type AgentConfig struct {
 
 	// Subagents configures child agent definitions for the Task tool.
 	Subagents *SubagentConfig
+
+	// Skills provides skill-based tool organization with semantic lookup.
+	Skills *SkillRegistry
+
+	// ContextBuilder controls dynamic per-turn tool selection.
+	// If nil, all registered tools are sent every turn (current behavior).
+	ContextBuilder *ContextBuilder
 }
 
 // NewAgent creates an Agent with the given configuration.
@@ -93,12 +103,14 @@ func NewAgent(cfg AgentConfig) *Agent {
 	}
 
 	a := &Agent{
-		client:     NewClient(cfg.Options),
-		tools:      tools,
-		hooks:      cfg.Hooks,
-		maxTurns:   cfg.MaxTurns,
-		canUseTool: cfg.CanUseTool,
-		subagents:  cfg.Subagents,
+		client:         NewClient(cfg.Options),
+		tools:          tools,
+		hooks:          cfg.Hooks,
+		maxTurns:       cfg.MaxTurns,
+		canUseTool:     cfg.CanUseTool,
+		subagents:      cfg.Subagents,
+		skills:         cfg.Skills,
+		contextBuilder: cfg.ContextBuilder,
 	}
 
 	// Register Task tool if subagents are configured
