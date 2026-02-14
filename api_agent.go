@@ -12,14 +12,16 @@ import (
 // APIAgent runs agentic loops using the Anthropic API directly.
 // This is the pattern used by labs-service for custom tool flows.
 type APIAgent struct {
-	client     anthropic.Client
-	tools      *ToolRegistry
-	hooks      *Hooks
-	model      string
-	system     string
-	maxTurns   int
-	canUseTool CanUseToolFunc
-	subagents  *SubagentConfig
+	client         anthropic.Client
+	tools          *ToolRegistry
+	hooks          *Hooks
+	model          string
+	system         string
+	maxTurns       int
+	canUseTool     CanUseToolFunc
+	subagents      *SubagentConfig
+	skills         *SkillRegistry
+	contextBuilder *ContextBuilder
 }
 
 // APIAgentConfig configures an API-based agent.
@@ -48,6 +50,13 @@ type APIAgentConfig struct {
 
 	// Subagents configures child agent definitions for the Task tool.
 	Subagents *SubagentConfig
+
+	// Skills provides skill-based tool organization with semantic lookup.
+	Skills *SkillRegistry
+
+	// ContextBuilder controls dynamic per-turn tool selection.
+	// If nil, all registered tools are sent every turn (current behavior).
+	ContextBuilder *ContextBuilder
 }
 
 // NewAPIAgent creates an agent that uses the Anthropic API.
@@ -72,14 +81,16 @@ func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
 	}
 
 	a := &APIAgent{
-		client:     client,
-		tools:      tools,
-		hooks:      cfg.Hooks,
-		model:      cfg.Model,
-		system:     cfg.SystemPrompt,
-		maxTurns:   cfg.MaxTurns,
-		canUseTool: cfg.CanUseTool,
-		subagents:  cfg.Subagents,
+		client:         client,
+		tools:          tools,
+		hooks:          cfg.Hooks,
+		model:          cfg.Model,
+		system:         cfg.SystemPrompt,
+		maxTurns:       cfg.MaxTurns,
+		canUseTool:     cfg.CanUseTool,
+		subagents:      cfg.Subagents,
+		skills:         cfg.Skills,
+		contextBuilder: cfg.ContextBuilder,
 	}
 
 	// Register Task tool if subagents are configured
@@ -108,8 +119,10 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 		anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
 	}
 
-	// Convert tool definitions to Anthropic format
-	tools := a.buildTools()
+	// Convert tool definitions to Anthropic format.
+	// When context builder is configured, tools are rebuilt each turn.
+	lastQuery := prompt
+	tools := a.buildToolsForQuery(ctx, lastQuery, events)
 
 	for turn := 0; turn < a.maxTurns; turn++ {
 		select {
@@ -117,6 +130,11 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 			events <- AgentEvent{Type: AgentEventError, Error: ctx.Err()}
 			return
 		default:
+		}
+
+		// Rebuild tools if context builder is configured (dynamic selection per turn).
+		if a.contextBuilder != nil && turn > 0 {
+			tools = a.buildToolsForQuery(ctx, lastQuery, events)
 		}
 
 		// Make streaming API call
@@ -158,12 +176,22 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 	}
 }
 
-func (a *APIAgent) buildTools() []anthropic.ToolUnionParam {
+func (a *APIAgent) buildToolsForQuery(ctx context.Context, query string, events chan<- AgentEvent) []anthropic.ToolUnionParam {
 	if a.tools == nil {
 		return nil
 	}
 
-	defs := a.tools.Definitions()
+	var defs []ToolDefinition
+	if a.contextBuilder != nil && query != "" {
+		defs = a.contextBuilder.SelectTools(ctx, query)
+		events <- AgentEvent{
+			Type:    AgentEventSkillsSelected,
+			Content: fmt.Sprintf("selected %d tools for query", len(defs)),
+		}
+	} else {
+		defs = a.tools.Definitions()
+	}
+
 	tools := make([]anthropic.ToolUnionParam, 0, len(defs))
 	for _, def := range defs {
 		tools = append(tools, anthropic.ToolUnionParam{

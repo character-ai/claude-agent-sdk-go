@@ -152,79 +152,120 @@ func (h *HookMatcher) Matches(toolName string) bool {
 }
 
 // Hooks configures hook handlers for tool execution.
+// Internally backed by a Store for indexed lookups and removal support.
 type Hooks struct {
-	// Matchers define which hooks apply to which tools.
-	Matchers []HookMatcher
+	store *Store
 	// EventHandlers maps lifecycle events to generic handlers.
+	// Kept as a direct map since event handlers are simple and don't need indexing.
 	EventHandlers map[HookEvent][]GenericHookHandler
+
+	// compiledRegexes caches compiled regexes by pattern.
+	regexMu sync.RWMutex
+	regexes map[string]*regexp.Regexp
 }
 
 // NewHooks creates a new Hooks configuration.
 func NewHooks() *Hooks {
 	return &Hooks{
-		Matchers:      make([]HookMatcher, 0),
+		store:         NewStore(),
 		EventHandlers: make(map[HookEvent][]GenericHookHandler),
+		regexes:       make(map[string]*regexp.Regexp),
+	}
+}
+
+// NewHooksWithStore creates a Hooks configuration sharing the given store.
+func NewHooksWithStore(store *Store) *Hooks {
+	return &Hooks{
+		store:         store,
+		EventHandlers: make(map[HookEvent][]GenericHookHandler),
+		regexes:       make(map[string]*regexp.Regexp),
 	}
 }
 
 // AddPreHook adds a pre-tool-use hook for the specified tool pattern.
 func (h *Hooks) AddPreHook(matcher string, hook PreToolUseHook) {
-	for i := range h.Matchers {
-		if h.Matchers[i].Matcher == matcher {
-			h.Matchers[i].PreHooks = append(h.Matchers[i].PreHooks, hook)
-			return
-		}
-	}
-	h.Matchers = append(h.Matchers, HookMatcher{
-		Matcher:  matcher,
-		PreHooks: []PreToolUseHook{hook},
-	})
+	h.addPreHookInternal(matcher, false, 0, hook)
 }
 
 // AddPostHook adds a post-tool-use hook for the specified tool pattern.
 func (h *Hooks) AddPostHook(matcher string, hook PostToolUseHook) {
-	for i := range h.Matchers {
-		if h.Matchers[i].Matcher == matcher {
-			h.Matchers[i].PostHooks = append(h.Matchers[i].PostHooks, hook)
-			return
-		}
-	}
-	h.Matchers = append(h.Matchers, HookMatcher{
-		Matcher:   matcher,
-		PostHooks: []PostToolUseHook{hook},
-	})
+	h.addPostHookInternal(matcher, false, 0, hook)
 }
 
 // AddPreHookWithOptions adds a pre-hook with matcher options (regex, timeout).
 func (h *Hooks) AddPreHookWithOptions(matcher string, isRegex bool, timeout time.Duration, hook PreToolUseHook) {
-	for i := range h.Matchers {
-		if h.Matchers[i].Matcher == matcher && h.Matchers[i].IsRegex == isRegex {
-			h.Matchers[i].PreHooks = append(h.Matchers[i].PreHooks, hook)
-			return
-		}
-	}
-	h.Matchers = append(h.Matchers, HookMatcher{
-		Matcher:  matcher,
-		IsRegex:  isRegex,
-		Timeout:  timeout,
-		PreHooks: []PreToolUseHook{hook},
-	})
+	h.addPreHookInternal(matcher, isRegex, timeout, hook)
 }
 
 // AddPostHookWithOptions adds a post-hook with matcher options (regex, timeout).
 func (h *Hooks) AddPostHookWithOptions(matcher string, isRegex bool, timeout time.Duration, hook PostToolUseHook) {
-	for i := range h.Matchers {
-		if h.Matchers[i].Matcher == matcher && h.Matchers[i].IsRegex == isRegex {
-			h.Matchers[i].PostHooks = append(h.Matchers[i].PostHooks, hook)
+	h.addPostHookInternal(matcher, isRegex, timeout, hook)
+}
+
+func (h *Hooks) addPreHookInternal(matcher string, isRegex bool, timeout time.Duration, hook PreToolUseHook) {
+	// Try to find an existing stored hook for this pattern+isRegex combo and append.
+	hooks, _ := h.store.ListHooksByPattern(matcher)
+	for _, sh := range hooks {
+		if sh.IsRegex == isRegex {
+			// Clone the stored hook with the new pre-hook appended.
+			updated := &StoredHook{
+				ID:        sh.ID,
+				Pattern:   sh.Pattern,
+				IsRegex:   sh.IsRegex,
+				Timeout:   sh.Timeout,
+				PreHooks:  append(sh.PreHooks, hook),
+				PostHooks: sh.PostHooks,
+			}
+			if timeout > 0 {
+				updated.Timeout = timeout
+			}
+			_ = h.store.InsertHook(updated)
 			return
 		}
 	}
-	h.Matchers = append(h.Matchers, HookMatcher{
-		Matcher:   matcher,
+
+	// No existing hook found — create a new one.
+	sh := &StoredHook{
+		Pattern:  matcher,
+		IsRegex:  isRegex,
+		Timeout:  timeout,
+		PreHooks: []PreToolUseHook{hook},
+	}
+	_ = h.store.InsertHook(sh)
+}
+
+func (h *Hooks) addPostHookInternal(matcher string, isRegex bool, timeout time.Duration, hook PostToolUseHook) {
+	hooks, _ := h.store.ListHooksByPattern(matcher)
+	for _, sh := range hooks {
+		if sh.IsRegex == isRegex {
+			updated := &StoredHook{
+				ID:        sh.ID,
+				Pattern:   sh.Pattern,
+				IsRegex:   sh.IsRegex,
+				Timeout:   sh.Timeout,
+				PreHooks:  sh.PreHooks,
+				PostHooks: append(sh.PostHooks, hook),
+			}
+			if timeout > 0 {
+				updated.Timeout = timeout
+			}
+			_ = h.store.InsertHook(updated)
+			return
+		}
+	}
+
+	sh := &StoredHook{
+		Pattern:   matcher,
 		IsRegex:   isRegex,
 		Timeout:   timeout,
 		PostHooks: []PostToolUseHook{hook},
-	})
+	}
+	_ = h.store.InsertHook(sh)
+}
+
+// RemoveHook removes a hook by its stored ID.
+func (h *Hooks) RemoveHook(id string) {
+	_ = h.store.DeleteHook(id)
 }
 
 // OnEvent registers a handler for a lifecycle event.
@@ -249,24 +290,61 @@ func (h *Hooks) EmitEvent(ctx context.Context, data HookEventData) {
 	}
 }
 
+// matchesToolName checks if a stored hook matches the tool name.
+func (h *Hooks) matchesToolName(sh *StoredHook, toolName string) bool {
+	if sh.Pattern == "*" {
+		return true
+	}
+	if sh.IsRegex {
+		re := h.getCompiledRegex(sh.Pattern)
+		if re != nil {
+			return re.MatchString(toolName)
+		}
+		return false
+	}
+	return sh.Pattern == toolName
+}
+
+func (h *Hooks) getCompiledRegex(pattern string) *regexp.Regexp {
+	h.regexMu.RLock()
+	re, ok := h.regexes[pattern]
+	h.regexMu.RUnlock()
+	if ok {
+		return re
+	}
+
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil
+	}
+	h.regexMu.Lock()
+	h.regexes[pattern] = compiled
+	h.regexMu.Unlock()
+	return compiled
+}
+
 // RunPreHooks executes all matching pre-tool-use hooks.
 // Returns the final decision and potentially modified input.
 func (h *Hooks) RunPreHooks(ctx context.Context, hookCtx HookContext) (HookResult, error) {
 	result := AllowHook()
 	currentInput := hookCtx.Input
 
-	for i := range h.Matchers {
-		matcher := &h.Matchers[i]
-		if !matcher.Matches(hookCtx.ToolName) {
+	storedHooks, err := h.store.ListHooks()
+	if err != nil {
+		return result, nil
+	}
+
+	for _, sh := range storedHooks {
+		if !h.matchesToolName(sh, hookCtx.ToolName) {
 			continue
 		}
 
-		for _, hook := range matcher.PreHooks {
+		for _, hook := range sh.PreHooks {
 			hookCtx.Input = currentInput
 
 			var hookResult HookResult
-			if matcher.Timeout > 0 {
-				timeoutCtx, cancel := context.WithTimeout(ctx, matcher.Timeout)
+			if sh.Timeout > 0 {
+				timeoutCtx, cancel := context.WithTimeout(ctx, sh.Timeout)
 				done := make(chan HookResult, 1)
 				go func() {
 					done <- hook(timeoutCtx, hookCtx)
@@ -303,15 +381,19 @@ func (h *Hooks) RunPreHooks(ctx context.Context, hookCtx HookContext) (HookResul
 
 // RunPostHooks executes all matching post-tool-use hooks.
 func (h *Hooks) RunPostHooks(ctx context.Context, hookCtx HookContext, toolResult string, isError bool) error {
-	for i := range h.Matchers {
-		matcher := &h.Matchers[i]
-		if !matcher.Matches(hookCtx.ToolName) {
+	storedHooks, err := h.store.ListHooks()
+	if err != nil {
+		return nil
+	}
+
+	for _, sh := range storedHooks {
+		if !h.matchesToolName(sh, hookCtx.ToolName) {
 			continue
 		}
 
-		for _, hook := range matcher.PostHooks {
-			if matcher.Timeout > 0 {
-				timeoutCtx, cancel := context.WithTimeout(ctx, matcher.Timeout)
+		for _, hook := range sh.PostHooks {
+			if sh.Timeout > 0 {
+				timeoutCtx, cancel := context.WithTimeout(ctx, sh.Timeout)
 				done := make(chan struct{}, 1)
 				go func() {
 					hook(timeoutCtx, hookCtx, toolResult, isError)
