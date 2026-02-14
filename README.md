@@ -420,6 +420,141 @@ cm := claude.NewCheckpointManager(sessionID, "", ".")
 err := cm.RewindFiles(ctx, userMessageID)
 ```
 
+## Unified Store
+
+All tools, skills, and hooks are stored in a unified `go-memdb`-backed store with indexed lookups and thread-safe access. Components can share a store for cross-cutting queries.
+
+```go
+// Create a shared store.
+store := claude.NewStore()
+
+// Create registries that share the store.
+tools := claude.NewToolRegistryWithStore(store)
+hooks := claude.NewHooksWithStore(store)
+skills := claude.NewSkillRegistry(store)
+
+// Query tools by source or tag.
+mcpTools, _ := store.ListToolsBySource("mcp:my-server")
+webTools, _ := store.ListToolsByTag("web")
+
+// Point-in-time snapshot for consistent reads.
+snap := store.Snapshot()
+defer snap.Close()
+allTools, _ := snap.Tools()
+allSkills, _ := snap.Skills()
+```
+
+## Skills
+
+Skills are composable capability bundles — groups of related tools with rich metadata (tags, categories, dependencies, examples). They enable semantic tool selection and modular agent composition.
+
+### Registering Skills
+
+```go
+store := claude.NewStore()
+skillReg := claude.NewSkillRegistry(store)
+
+// Create tools for the skill.
+webTools := claude.NewToolRegistry()
+claude.RegisterFunc(webTools, claude.ToolDefinition{
+    Name:        "web_search",
+    Description: "Search the web for information",
+    InputSchema: claude.ObjectSchema(map[string]any{
+        "query": claude.StringParam("The search query"),
+    }, "query"),
+}, func(ctx context.Context, input struct {
+    Query string `json:"query"`
+}) (string, error) {
+    return fmt.Sprintf("Results for: %s", input.Query), nil
+})
+
+// Register the skill with its tools.
+err := skillReg.Register(claude.Skill{
+    Name:        "web-research",
+    Description: "Search the web and fetch page content",
+    Tags:        []string{"web", "search", "research"},
+    Category:    "research",
+    Examples: []claude.SkillExample{
+        {Query: "Find the latest news about Go", ToolsUsed: []string{"web_search"}},
+    },
+}, webTools)
+```
+
+### Querying Skills
+
+```go
+// By tag.
+webSkills, _ := skillReg.ByTag("web")
+
+// By category.
+researchSkills, _ := skillReg.ByCategory("research")
+
+// All skills.
+all, _ := skillReg.All()
+```
+
+### Dependency Resolution
+
+Skills can declare dependencies. `Resolve` performs transitive resolution with cycle detection:
+
+```go
+// "web-research" depends on "text-processing".
+skillReg.Register(claude.Skill{
+    Name:         "web-research",
+    Dependencies: []string{"text-processing"},
+}, webTools)
+
+// Resolve returns a ToolRegistry with tools from both skills.
+resolved, _ := skillReg.Resolve("web-research")
+```
+
+## BM25 Search
+
+The SDK includes a zero-dependency BM25 keyword search index for semantic skill/tool selection:
+
+```go
+index := claude.NewBM25Index()
+
+// Index skills by description + tags.
+_ = index.Index("web-research", "Search the web and fetch page content", []string{"web", "search"})
+_ = index.Index("math", "Perform mathematical calculations", []string{"math", "calculation"})
+
+// Search returns ranked results.
+results := index.Search("search the web for information", 3)
+for _, r := range results {
+    fmt.Printf("  %s (score: %.3f)\n", r.ID, r.Score)
+}
+```
+
+You can also implement the `SkillIndex` interface for custom search backends (e.g., vector search).
+
+## Context Builder (Dynamic Tool Selection)
+
+The `ContextBuilder` selects relevant tools per turn using BM25 search over skill descriptions. This keeps the tool list small and focused, improving model performance.
+
+```go
+store := claude.NewStore()
+index := claude.NewBM25Index()
+skillReg := claude.NewSkillRegistry(store)
+
+// ... register skills and index them ...
+
+cb := claude.NewContextBuilder(store, claude.WithIndex(index), claude.WithMaxTools(10))
+
+// Use with APIAgent for dynamic per-turn tool selection.
+agent := claude.NewAPIAgent(claude.APIAgentConfig{
+    Tools:          claude.NewToolRegistryWithStore(store),
+    Skills:         skillReg,
+    ContextBuilder: cb,
+    SystemPrompt:   "You are a helpful assistant.",
+})
+```
+
+When `ContextBuilder` is configured:
+- Each turn, tools are selected based on the current query context
+- Dependencies are resolved transitively with decaying relevance scores
+- Falls back to all tools if no index is configured or query is empty
+
 ## Graceful Shutdown
 
 The SDK provides both immediate and graceful shutdown methods:
@@ -616,6 +751,8 @@ fmt.Println(server.HasTool("greet")) // Check if a tool exists
 | `MaxTurns` | `int` | Max turns (default: 10) |
 | `CanUseTool` | `CanUseToolFunc` | Permission callback (called before hooks) |
 | `Subagents` | `*SubagentConfig` | Subagent definitions for Task tool |
+| `Skills` | `*SkillRegistry` | Skill-based tool organization |
+| `ContextBuilder` | `*ContextBuilder` | Dynamic per-turn tool selection |
 
 ### APIAgentConfig
 
@@ -629,6 +766,8 @@ fmt.Println(server.HasTool("greet")) // Check if a tool exists
 | `MaxTurns` | `int` | Max turns (default: 10) |
 | `CanUseTool` | `CanUseToolFunc` | Permission callback (called before hooks) |
 | `Subagents` | `*SubagentConfig` | Subagent definitions for Task tool |
+| `Skills` | `*SkillRegistry` | Skill-based tool organization |
+| `ContextBuilder` | `*ContextBuilder` | Dynamic per-turn tool selection |
 
 ### Built-in Tool Control
 
@@ -739,6 +878,7 @@ See the [examples](./examples) directory:
 - [generation](./examples/generation) - Custom tools for image/video generation (API agent)
 - [hooks](./examples/hooks) - Hook patterns: regex, timeout, lifecycle events, permissions
 - [subagents](./examples/subagents) - Subagent definitions with the Task tool
+- [skills](./examples/skills) - Skills, BM25 search, context builder, and dynamic tool selection
 
 ---
 
@@ -809,6 +949,11 @@ This Go SDK aims for feature parity with the [official Python Claude Agent SDK](
 | TextBlock | ✓ | ✓ | |
 | ToolUseBlock | ✓ | ✓ | |
 | ToolResultBlock | ✓ | ✓ | |
+| **Skills & Context** |
+| Skill registry | - | `SkillRegistry` | Go-only: composable capability bundles |
+| BM25 search | - | `BM25Index` | Go-only: zero-dependency keyword search |
+| Context builder | - | `ContextBuilder` | Go-only: dynamic per-turn tool selection |
+| Unified store | - | `Store` | Go-only: go-memdb backed indexed storage |
 | **Extras** |
 | SSE HTTP helpers | - | `SSEWriter` | Go-only feature |
 | HTTP handler | - | `AgentHTTPHandler` | Go-only feature |
@@ -821,6 +966,8 @@ Features available in the Go SDK but not in Python:
 2. **SSE Helpers** - Built-in Server-Sent Events support for HTTP streaming
 3. **HTTP Handler** - Ready-to-use HTTP handler for agent endpoints
 4. **Type-Safe Tool Registration** - Generics-based `RegisterFunc[T]`
+5. **Skills & Context Builder** - Composable capability bundles with BM25-based dynamic tool selection
+6. **Unified Store** - `go-memdb`-backed indexed storage for tools, skills, and hooks
 
 ### Python-Specific Features
 

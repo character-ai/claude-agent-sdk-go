@@ -27,19 +27,15 @@ func NewSkillRegistry(store *Store) *SkillRegistry {
 // Register adds a skill and its tools to the store.
 // Each tool from the ToolRegistry is stored with Source="skill:<name>" and inherits the skill's tags.
 func (sr *SkillRegistry) Register(skill Skill, tools *ToolRegistry) error {
-	// Collect tool definitions and handlers.
+	// Collect tool definitions and handlers via public API.
 	var toolDefs []ToolDefinition
 	handlers := make(map[string]ToolHandler)
 
 	if tools != nil {
-		storedTools, err := tools.store.ListTools()
-		if err != nil {
-			return fmt.Errorf("list skill tools: %w", err)
-		}
-		for _, st := range storedTools {
-			toolDefs = append(toolDefs, st.ToolDefinition)
-			if st.Handler != nil {
-				handlers[st.Name] = st.Handler
+		toolDefs = tools.Definitions()
+		for _, def := range toolDefs {
+			if h, ok := tools.GetHandler(def.Name); ok {
+				handlers[def.Name] = h
 			}
 		}
 	}

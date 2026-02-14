@@ -17,10 +17,56 @@ func main() {
 	// Create a skill registry backed by the shared store.
 	skillReg := claude.NewSkillRegistry(store)
 
+	// Create hooks that share the same store.
+	hooks := claude.NewHooksWithStore(store)
+	hooks.OnAllTools().Before(func(ctx context.Context, hc claude.HookContext) claude.HookResult {
+		fmt.Printf("  [hook] tool called: %s\n", hc.ToolName)
+		return claude.AllowHook()
+	})
+
 	// Create a BM25 index for semantic tool selection.
 	index := claude.NewBM25Index()
 
-	// --- Register "web-research" skill ---
+	// --- Register "text-processing" skill (base dependency) ---
+	textTools := claude.NewToolRegistry()
+	claude.RegisterFunc(textTools, claude.ToolDefinition{
+		Name:        "tokenize",
+		Description: "Tokenize text into words",
+		InputSchema: claude.ObjectSchema(map[string]any{
+			"text": claude.StringParam("The text to tokenize"),
+		}, "text"),
+	}, func(ctx context.Context, input struct {
+		Text string `json:"text"`
+	}) (string, error) {
+		return fmt.Sprintf("Tokens: %v", input.Text), nil
+	})
+
+	claude.RegisterFunc(textTools, claude.ToolDefinition{
+		Name:        "summarize",
+		Description: "Summarize a piece of text",
+		InputSchema: claude.ObjectSchema(map[string]any{
+			"text": claude.StringParam("The text to summarize"),
+		}, "text"),
+	}, func(ctx context.Context, input struct {
+		Text string `json:"text"`
+	}) (string, error) {
+		if len(input.Text) > 100 {
+			return input.Text[:100] + "...", nil
+		}
+		return input.Text, nil
+	})
+
+	if err := skillReg.Register(claude.Skill{
+		Name:        "text-processing",
+		Description: "Process, analyze, and summarize text content",
+		Tags:        []string{"text", "nlp", "summarize"},
+		Category:    "processing",
+	}, textTools); err != nil {
+		log.Fatal(err)
+	}
+	_ = index.Index("text-processing", "Process, analyze, and summarize text content", []string{"text", "nlp", "summarize"})
+
+	// --- Register "web-research" skill (depends on text-processing) ---
 	webTools := claude.NewToolRegistry()
 	claude.RegisterFunc(webTools, claude.ToolDefinition{
 		Name:        "web_search",
@@ -47,10 +93,11 @@ func main() {
 	})
 
 	if err := skillReg.Register(claude.Skill{
-		Name:        "web-research",
-		Description: "Search the web and fetch page content for research",
-		Tags:        []string{"web", "search", "research"},
-		Category:    "research",
+		Name:         "web-research",
+		Description:  "Search the web and fetch page content for research",
+		Tags:         []string{"web", "search", "research"},
+		Category:     "research",
+		Dependencies: []string{"text-processing"}, // depends on text-processing
 		Examples: []claude.SkillExample{
 			{Query: "Find the latest news about Go", ToolsUsed: []string{"web_search", "fetch_page"}},
 		},
@@ -83,33 +130,6 @@ func main() {
 	}
 	_ = index.Index("math", "Perform mathematical calculations and evaluations", []string{"math", "calculation"})
 
-	// --- Register "text-processing" skill ---
-	textTools := claude.NewToolRegistry()
-	claude.RegisterFunc(textTools, claude.ToolDefinition{
-		Name:        "summarize",
-		Description: "Summarize a piece of text",
-		InputSchema: claude.ObjectSchema(map[string]any{
-			"text": claude.StringParam("The text to summarize"),
-		}, "text"),
-	}, func(ctx context.Context, input struct {
-		Text string `json:"text"`
-	}) (string, error) {
-		if len(input.Text) > 100 {
-			return input.Text[:100] + "...", nil
-		}
-		return input.Text, nil
-	})
-
-	if err := skillReg.Register(claude.Skill{
-		Name:        "text-processing",
-		Description: "Process, analyze, and summarize text content",
-		Tags:        []string{"text", "nlp", "summarize"},
-		Category:    "processing",
-	}, textTools); err != nil {
-		log.Fatal(err)
-	}
-	_ = index.Index("text-processing", "Process, analyze, and summarize text content", []string{"text", "nlp", "summarize"})
-
 	// --- Demo: Query the skill registry ---
 	fmt.Println("=== All Registered Skills ===")
 	allSkills, _ := skillReg.All()
@@ -129,6 +149,21 @@ func main() {
 		fmt.Printf("  - %s\n", s.Name)
 	}
 
+	// --- Demo: Shared store queries ---
+	fmt.Println("\n=== Shared Store: tools by source ===")
+	webSkillTools, _ := store.ListToolsBySource("skill:web-research")
+	for _, t := range webSkillTools {
+		fmt.Printf("  - %s (source: %s)\n", t.Name, t.Source)
+	}
+
+	fmt.Println("\n=== Shared Store: snapshot ===")
+	snap := store.Snapshot()
+	snapTools, _ := snap.Tools()
+	fmt.Printf("  Tools in snapshot: %d\n", len(snapTools))
+	snapSkills, _ := snap.Skills()
+	fmt.Printf("  Skills in snapshot: %d\n", len(snapSkills))
+	snap.Close()
+
 	// --- Demo: BM25 search ---
 	fmt.Println("\n=== BM25 Search: 'search web for information' ===")
 	results := index.Search("search web for information", 3)
@@ -136,8 +171,8 @@ func main() {
 		fmt.Printf("  - %s (score: %.3f)\n", r.ID, r.Score)
 	}
 
-	// --- Demo: Resolve dependencies ---
-	fmt.Println("\n=== Resolve 'web-research' skill tools ===")
+	// --- Demo: Resolve dependencies (transitive) ---
+	fmt.Println("\n=== Resolve 'web-research' skill tools (includes text-processing dep) ===")
 	resolved, err := skillReg.Resolve("web-research")
 	if err != nil {
 		log.Fatal(err)
@@ -154,12 +189,17 @@ func main() {
 		fmt.Printf("  - %s: %s\n", def.Name, def.Description)
 	}
 
+	fmt.Println("\n=== Context Builder: select skills for 'calculate math' ===")
+	skills := cb.SelectSkills(context.Background(), "calculate math", 2)
+	for _, s := range skills {
+		fmt.Printf("  - %s: %s\n", s.Name, s.Description)
+	}
+
 	// --- Demo: Use with APIAgent (requires API key) ---
 	fmt.Println("\n=== APIAgent Configuration (not running - needs API key) ===")
 
-	// Merge all skill tools into one registry for the agent.
+	// All tools are already in the shared store from skill registration.
 	allTools := claude.NewToolRegistryWithStore(store)
-	// Tools are already in the store from skill registration.
 
 	fmt.Printf("  Total tools available: %d\n", len(allTools.Definitions()))
 	fmt.Println("  Context builder configured with BM25 index")
@@ -169,6 +209,7 @@ func main() {
 	//
 	// agent := claude.NewAPIAgent(claude.APIAgentConfig{
 	//     Tools:          allTools,
+	//     Hooks:          hooks,
 	//     Skills:         skillReg,
 	//     ContextBuilder: cb,
 	//     SystemPrompt:   "You are a helpful assistant with web research, math, and text processing capabilities.",
@@ -181,4 +222,5 @@ func main() {
 	// }
 
 	_ = json.Marshal // silence import
+	_ = hooks        // used in commented agent config above
 }

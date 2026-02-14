@@ -116,41 +116,6 @@ type PostToolUseHook func(ctx context.Context, hookCtx HookContext, result strin
 // GenericHookHandler is a function called for lifecycle events.
 type GenericHookHandler func(ctx context.Context, data HookEventData)
 
-// HookMatcher matches tools by name pattern.
-type HookMatcher struct {
-	// Matcher is the tool name to match (exact match, "*" for all, or a regex pattern).
-	Matcher string
-	// IsRegex indicates the Matcher should be treated as a regular expression.
-	IsRegex bool
-	// Timeout is the maximum duration for hook execution. Zero means no timeout.
-	Timeout time.Duration
-	// PreHooks are called before tool execution.
-	PreHooks []PreToolUseHook
-	// PostHooks are called after tool execution.
-	PostHooks []PostToolUseHook
-
-	// compiled regex (lazily initialized)
-	compiledOnce sync.Once
-	compiledRe   *regexp.Regexp
-}
-
-// Matches returns true if the matcher applies to the given tool name.
-func (h *HookMatcher) Matches(toolName string) bool {
-	if h.Matcher == "*" {
-		return true
-	}
-	if h.IsRegex {
-		h.compiledOnce.Do(func() {
-			h.compiledRe, _ = regexp.Compile(h.Matcher)
-		})
-		if h.compiledRe != nil {
-			return h.compiledRe.MatchString(toolName)
-		}
-		return false
-	}
-	return h.Matcher == toolName
-}
-
 // Hooks configures hook handlers for tool execution.
 // Internally backed by a Store for indexed lookups and removal support.
 type Hooks struct {
@@ -207,14 +172,21 @@ func (h *Hooks) addPreHookInternal(matcher string, isRegex bool, timeout time.Du
 	hooks, _ := h.store.ListHooksByPattern(matcher)
 	for _, sh := range hooks {
 		if sh.IsRegex == isRegex {
-			// Clone the stored hook with the new pre-hook appended.
+			// Deep copy slices to avoid mutating the memdb-stored object.
+			preHooks := make([]PreToolUseHook, len(sh.PreHooks)+1)
+			copy(preHooks, sh.PreHooks)
+			preHooks[len(sh.PreHooks)] = hook
+
+			postHooks := make([]PostToolUseHook, len(sh.PostHooks))
+			copy(postHooks, sh.PostHooks)
+
 			updated := &StoredHook{
 				ID:        sh.ID,
 				Pattern:   sh.Pattern,
 				IsRegex:   sh.IsRegex,
 				Timeout:   sh.Timeout,
-				PreHooks:  append(sh.PreHooks, hook),
-				PostHooks: sh.PostHooks,
+				PreHooks:  preHooks,
+				PostHooks: postHooks,
 			}
 			if timeout > 0 {
 				updated.Timeout = timeout
@@ -238,13 +210,21 @@ func (h *Hooks) addPostHookInternal(matcher string, isRegex bool, timeout time.D
 	hooks, _ := h.store.ListHooksByPattern(matcher)
 	for _, sh := range hooks {
 		if sh.IsRegex == isRegex {
+			// Deep copy slices to avoid mutating the memdb-stored object.
+			preHooks := make([]PreToolUseHook, len(sh.PreHooks))
+			copy(preHooks, sh.PreHooks)
+
+			postHooks := make([]PostToolUseHook, len(sh.PostHooks)+1)
+			copy(postHooks, sh.PostHooks)
+			postHooks[len(sh.PostHooks)] = hook
+
 			updated := &StoredHook{
 				ID:        sh.ID,
 				Pattern:   sh.Pattern,
 				IsRegex:   sh.IsRegex,
 				Timeout:   sh.Timeout,
-				PreHooks:  sh.PreHooks,
-				PostHooks: append(sh.PostHooks, hook),
+				PreHooks:  preHooks,
+				PostHooks: postHooks,
 			}
 			if timeout > 0 {
 				updated.Timeout = timeout

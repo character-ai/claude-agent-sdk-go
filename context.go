@@ -61,45 +61,12 @@ func (cb *ContextBuilder) SelectTools(_ context.Context, query string) []ToolDef
 		return cb.allToolDefs()
 	}
 
-	// 2. Collect skill names from results.
-	skillNames := make([]string, 0, len(skillResults))
-	for _, sr := range skillResults {
-		skillNames = append(skillNames, sr.ID)
-	}
-
-	// 3. Resolve dependencies and collect tools.
+	// 2. Resolve dependencies transitively and collect tools.
 	toolSet := make(map[string]ToolDefinition)
 	toolScores := make(map[string]float64)
 
 	for _, sr := range skillResults {
-		skill, err := cb.store.GetSkill(sr.ID)
-		if err != nil || skill == nil {
-			continue
-		}
-
-		// Add this skill's tools.
-		for _, def := range skill.Tools {
-			toolSet[def.Name] = def
-			if sr.Score > toolScores[def.Name] {
-				toolScores[def.Name] = sr.Score
-			}
-		}
-
-		// Resolve dependencies.
-		for _, dep := range skill.Dependencies {
-			depSkill, err := cb.store.GetSkill(dep)
-			if err != nil || depSkill == nil {
-				continue
-			}
-			for _, def := range depSkill.Tools {
-				toolSet[def.Name] = def
-				// Dependency tools get a fraction of the parent's score.
-				score := sr.Score * 0.5
-				if score > toolScores[def.Name] {
-					toolScores[def.Name] = score
-				}
-			}
-		}
+		cb.resolveSkillTools(sr.ID, sr.Score, 1.0, make(map[string]bool), toolSet, toolScores)
 	}
 
 	// 4. If too many tools, rank by score and take top maxTools.
@@ -145,6 +112,37 @@ func (cb *ContextBuilder) SelectSkills(_ context.Context, query string, k int) [
 		skills = append(skills, storedToSkill(stored))
 	}
 	return skills
+}
+
+// resolveSkillTools recursively resolves a skill and its dependencies, adding tools to the sets.
+// visited prevents infinite recursion on cyclic dependencies. depthFactor decays score for deeper deps.
+func (cb *ContextBuilder) resolveSkillTools(
+	skillID string, baseScore, depthFactor float64,
+	visited map[string]bool,
+	toolSet map[string]ToolDefinition, toolScores map[string]float64,
+) {
+	if visited[skillID] {
+		return
+	}
+	visited[skillID] = true
+
+	skill, err := cb.store.GetSkill(skillID)
+	if err != nil || skill == nil {
+		return
+	}
+
+	score := baseScore * depthFactor
+	for _, def := range skill.Tools {
+		toolSet[def.Name] = def
+		if score > toolScores[def.Name] {
+			toolScores[def.Name] = score
+		}
+	}
+
+	// Recurse into dependencies with decaying score.
+	for _, dep := range skill.Dependencies {
+		cb.resolveSkillTools(dep, baseScore, depthFactor*0.5, visited, toolSet, toolScores)
+	}
 }
 
 // allToolDefs returns all tool definitions from the store.

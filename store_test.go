@@ -261,8 +261,10 @@ func TestStoreInsertAndListHooks(t *testing.T) {
 	if err := store.InsertHook(hook); err != nil {
 		t.Fatalf("InsertHook failed: %v", err)
 	}
-	if hook.ID == "" {
-		t.Fatal("expected auto-generated ID")
+
+	// InsertHook should NOT mutate caller's struct (copies internally).
+	if hook.ID != "" {
+		t.Fatal("expected caller struct to remain unmutated")
 	}
 
 	hooks, err := store.ListHooks()
@@ -271,6 +273,9 @@ func TestStoreInsertAndListHooks(t *testing.T) {
 	}
 	if len(hooks) != 1 {
 		t.Fatalf("expected 1 hook, got %d", len(hooks))
+	}
+	if hooks[0].ID == "" {
+		t.Fatal("expected stored hook to have auto-generated ID")
 	}
 }
 

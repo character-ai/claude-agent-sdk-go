@@ -120,7 +120,7 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 	}
 
 	// Convert tool definitions to Anthropic format.
-	// When context builder is configured, tools are rebuilt each turn.
+	// When context builder is configured, tools are rebuilt each turn based on latest context.
 	lastQuery := prompt
 	tools := a.buildToolsForQuery(ctx, lastQuery, events)
 
@@ -156,7 +156,9 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 		// Execute tools
 		toolResults := a.executeTools(ctx, toolCalls, events)
 
-		// Add tool results to messages
+		// Update lastQuery from tool results so context builder can adapt per turn.
+		// Use the concatenation of tool result content as the next query context.
+		var resultContext string
 		var resultBlocks []anthropic.ContentBlockParamUnion
 		for _, tr := range toolResults {
 			resultBlocks = append(resultBlocks, anthropic.NewToolResultBlock(
@@ -164,7 +166,14 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 				tr.Content,
 				tr.IsError,
 			))
+			if !tr.IsError && tr.Content != "" {
+				resultContext += tr.Content + " "
+			}
 		}
+		if resultContext != "" {
+			lastQuery = resultContext
+		}
+
 		messages = append(messages, anthropic.NewUserMessage(resultBlocks...))
 
 		events <- AgentEvent{Type: AgentEventTurnComplete}

@@ -8,7 +8,8 @@ import (
 	"github.com/hashicorp/go-memdb"
 )
 
-// hookIDCounter generates unique IDs for stored hooks.
+// hookIDCounter generates unique IDs for stored hooks within a process lifetime.
+// IDs are not stable across restarts (acceptable since memdb is in-memory only).
 var hookIDCounter atomic.Uint64
 
 func nextHookID() string {
@@ -177,28 +178,32 @@ func (s *Store) GetTool(name string) (*StoredTool, error) {
 	if raw == nil {
 		return nil, nil
 	}
-	return raw.(*StoredTool), nil
+	tool, ok := raw.(*StoredTool)
+	if !ok {
+		return nil, fmt.Errorf("get tool: unexpected type %T", raw)
+	}
+	return tool, nil
 }
 
 // ListTools returns all stored tools.
 func (s *Store) ListTools() ([]*StoredTool, error) {
 	txn := s.db.Txn(false)
 	defer txn.Abort()
-	return collectTools(txn, "tools", "id")
+	return collectTools(txn, "id")
 }
 
 // ListToolsBySource returns tools matching the given source.
 func (s *Store) ListToolsBySource(source string) ([]*StoredTool, error) {
 	txn := s.db.Txn(false)
 	defer txn.Abort()
-	return collectToolsFiltered(txn, "tools", "source", source)
+	return collectToolsFiltered(txn, "source", source)
 }
 
 // ListToolsByTag returns tools matching the given tag.
 func (s *Store) ListToolsByTag(tag string) ([]*StoredTool, error) {
 	txn := s.db.Txn(false)
 	defer txn.Abort()
-	return collectToolsFiltered(txn, "tools", "tags", tag)
+	return collectToolsFiltered(txn, "tags", tag)
 }
 
 // --- Skill operations ---
@@ -243,36 +248,44 @@ func (s *Store) GetSkill(name string) (*StoredSkill, error) {
 	if raw == nil {
 		return nil, nil
 	}
-	return raw.(*StoredSkill), nil
+	skill, ok := raw.(*StoredSkill)
+	if !ok {
+		return nil, fmt.Errorf("get skill: unexpected type %T", raw)
+	}
+	return skill, nil
 }
 
 // ListSkills returns all stored skills.
 func (s *Store) ListSkills() ([]*StoredSkill, error) {
 	txn := s.db.Txn(false)
 	defer txn.Abort()
-	return collectSkills(txn, "skills", "id")
+	return collectSkills(txn, "id")
 }
 
 // ListSkillsByCategory returns skills in the given category.
 func (s *Store) ListSkillsByCategory(category string) ([]*StoredSkill, error) {
 	txn := s.db.Txn(false)
 	defer txn.Abort()
-	return collectSkillsFiltered(txn, "skills", "category", category)
+	return collectSkillsFiltered(txn, "category", category)
 }
 
 // ListSkillsByTag returns skills matching the given tag.
 func (s *Store) ListSkillsByTag(tag string) ([]*StoredSkill, error) {
 	txn := s.db.Txn(false)
 	defer txn.Abort()
-	return collectSkillsFiltered(txn, "skills", "tags", tag)
+	return collectSkillsFiltered(txn, "tags", tag)
 }
 
 // --- Hook operations ---
 
-// InsertHook adds a hook to the store. If ID is empty, one is auto-generated.
+// InsertHook adds a hook to the store. If ID is empty, one is auto-generated
+// on a copy so the caller's struct is not mutated.
 func (s *Store) InsertHook(hook *StoredHook) error {
 	if hook.ID == "" {
-		hook.ID = nextHookID()
+		// Copy to avoid mutating caller's struct.
+		cp := *hook
+		cp.ID = nextHookID()
+		hook = &cp
 	}
 	txn := s.db.Txn(true)
 	defer txn.Abort()
@@ -312,7 +325,11 @@ func (s *Store) GetHook(id string) (*StoredHook, error) {
 	if raw == nil {
 		return nil, nil
 	}
-	return raw.(*StoredHook), nil
+	hook, ok := raw.(*StoredHook)
+	if !ok {
+		return nil, fmt.Errorf("get hook: unexpected type %T", raw)
+	}
+	return hook, nil
 }
 
 // ListHooks returns all stored hooks.
@@ -325,7 +342,10 @@ func (s *Store) ListHooks() ([]*StoredHook, error) {
 	}
 	var hooks []*StoredHook
 	for obj := it.Next(); obj != nil; obj = it.Next() {
-		hooks = append(hooks, obj.(*StoredHook))
+		h, ok := obj.(*StoredHook)
+		if ok {
+			hooks = append(hooks, h)
+		}
 	}
 	return hooks, nil
 }
@@ -340,7 +360,10 @@ func (s *Store) ListHooksByPattern(pattern string) ([]*StoredHook, error) {
 	}
 	var hooks []*StoredHook
 	for obj := it.Next(); obj != nil; obj = it.Next() {
-		hooks = append(hooks, obj.(*StoredHook))
+		h, ok := obj.(*StoredHook)
+		if ok {
+			hooks = append(hooks, h)
+		}
 	}
 	return hooks, nil
 }
@@ -353,81 +376,87 @@ func (s *Store) Snapshot() *StoreSnapshot {
 }
 
 // StoreSnapshot provides read-only access to a consistent store state.
+// Call Close when done to release the read transaction.
 type StoreSnapshot struct {
 	txn *memdb.Txn
 }
 
+// Close releases the snapshot's read transaction.
+func (ss *StoreSnapshot) Close() {
+	ss.txn.Abort()
+}
+
 // Tools returns all tools in the snapshot.
 func (ss *StoreSnapshot) Tools() ([]*StoredTool, error) {
-	return collectTools(ss.txn, "tools", "id")
+	return collectTools(ss.txn, "id")
 }
 
 // ToolsBySource returns tools matching the given source.
 func (ss *StoreSnapshot) ToolsBySource(source string) ([]*StoredTool, error) {
-	return collectToolsFiltered(ss.txn, "tools", "source", source)
+	return collectToolsFiltered(ss.txn, "source", source)
 }
 
 // ToolsByTag returns tools matching the given tag.
 func (ss *StoreSnapshot) ToolsByTag(tag string) ([]*StoredTool, error) {
-	return collectToolsFiltered(ss.txn, "tools", "tags", tag)
+	return collectToolsFiltered(ss.txn, "tags", tag)
 }
 
 // Skills returns all skills in the snapshot.
 func (ss *StoreSnapshot) Skills() ([]*StoredSkill, error) {
-	return collectSkills(ss.txn, "skills", "id")
+	return collectSkills(ss.txn, "id")
 }
 
 // SkillsByCategory returns skills in the given category.
 func (ss *StoreSnapshot) SkillsByCategory(category string) ([]*StoredSkill, error) {
-	return collectSkillsFiltered(ss.txn, "skills", "category", category)
+	return collectSkillsFiltered(ss.txn, "category", category)
 }
 
 // --- Internal helpers ---
 
-func collectTools(txn *memdb.Txn, table, index string) ([]*StoredTool, error) {
-	it, err := txn.Get(table, index)
+func collectTools(txn *memdb.Txn, index string) ([]*StoredTool, error) {
+	it, err := txn.Get("tools", index)
 	if err != nil {
 		return nil, err
 	}
 	var tools []*StoredTool
 	for obj := it.Next(); obj != nil; obj = it.Next() {
-		tools = append(tools, obj.(*StoredTool))
+		tools = append(tools, obj.(*StoredTool)) //nolint:errcheck // schema guarantees type
 	}
 	return tools, nil
 }
 
-func collectToolsFiltered(txn *memdb.Txn, table, index, value string) ([]*StoredTool, error) {
-	it, err := txn.Get(table, index, value)
+func collectToolsFiltered(txn *memdb.Txn, index, value string) ([]*StoredTool, error) {
+	it, err := txn.Get("tools", index, value)
 	if err != nil {
 		return nil, err
 	}
 	var tools []*StoredTool
 	for obj := it.Next(); obj != nil; obj = it.Next() {
-		tools = append(tools, obj.(*StoredTool))
+		tools = append(tools, obj.(*StoredTool)) //nolint:errcheck // schema guarantees type
 	}
 	return tools, nil
 }
 
-func collectSkills(txn *memdb.Txn, table, index string) ([]*StoredSkill, error) {
-	it, err := txn.Get(table, index)
+func collectSkills(txn *memdb.Txn, index string) ([]*StoredSkill, error) {
+	it, err := txn.Get("skills", index)
 	if err != nil {
 		return nil, err
 	}
 	var skills []*StoredSkill
 	for obj := it.Next(); obj != nil; obj = it.Next() {
-		skills = append(skills, obj.(*StoredSkill))
+		skills = append(skills, obj.(*StoredSkill)) //nolint:errcheck // schema guarantees type
 	}
 	return skills, nil
 }
 
-func collectSkillsFiltered(txn *memdb.Txn, table, index, value string) ([]*StoredSkill, error) {
-	it, err := txn.Get(table, index, value)
+func collectSkillsFiltered(txn *memdb.Txn, index, value string) ([]*StoredSkill, error) {
+	it, err := txn.Get("skills", index, value)
 	if err != nil {
 		return nil, err
 	}
 	var skills []*StoredSkill
 	for obj := it.Next(); obj != nil; obj = it.Next() {
-		skills = append(skills, obj.(*StoredSkill))
+		skills = append(skills, obj.(*StoredSkill)) //nolint:errcheck // schema guarantees type
 	}
 	return skills, nil
 }
