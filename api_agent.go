@@ -27,7 +27,7 @@ type APIAgent struct {
 // APIAgentConfig configures an API-based agent.
 type APIAgentConfig struct {
 	// Anthropic API key (defaults to ANTHROPIC_API_KEY env var)
-	APIKey string
+	APIKey string // #nosec G117 -- This is a config field, not a hardcoded secret
 
 	// Model to use (defaults to claude-sonnet-4-20250514)
 	Model string
