@@ -18,6 +18,7 @@ type APIAgent struct {
 	model          string
 	system         string
 	maxTurns       int
+	maxTokens      int
 	canUseTool     CanUseToolFunc
 	subagents      *SubagentConfig
 	skills         *SkillRegistry
@@ -43,6 +44,10 @@ type APIAgentConfig struct {
 
 	// Maximum turns before stopping (default: 10)
 	MaxTurns int
+
+	// MaxTokens is the maximum number of tokens the model can generate per turn.
+	// Defaults to 4096.
+	MaxTokens int
 
 	// CanUseTool is called before tool execution to get permission.
 	// It is invoked before hooks.
@@ -74,6 +79,9 @@ func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
 	if cfg.MaxTurns == 0 {
 		cfg.MaxTurns = 10
 	}
+	if cfg.MaxTokens == 0 {
+		cfg.MaxTokens = 4096
+	}
 
 	tools := cfg.Tools
 	if tools == nil {
@@ -87,6 +95,7 @@ func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
 		model:          cfg.Model,
 		system:         cfg.SystemPrompt,
 		maxTurns:       cfg.MaxTurns,
+		maxTokens:      cfg.MaxTokens,
 		canUseTool:     cfg.CanUseTool,
 		subagents:      cfg.Subagents,
 		skills:         cfg.Skills,
@@ -229,7 +238,7 @@ func (a *APIAgent) streamTurn(
 
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(a.model),
-		MaxTokens: 4096,
+		MaxTokens: int64(a.maxTokens),
 		Messages:  messages,
 	}
 
