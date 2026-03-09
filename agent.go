@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // AgentEvent represents events emitted during agent execution.
@@ -27,6 +28,9 @@ type AgentEvent struct {
 	ParentToolUseID string
 	// SubagentName identifies which subagent produced this event
 	SubagentName string
+
+	// For turn_complete events - populated when a MetricsCollector is configured
+	TurnMetrics *TurnMetrics
 }
 
 // AgentEventType categorizes agent events.
@@ -56,6 +60,8 @@ type Agent struct {
 	subagents      *SubagentConfig
 	skills         *SkillRegistry
 	contextBuilder *ContextBuilder
+	metrics        *MetricsCollector
+	parallelTools  bool
 
 	mu       sync.Mutex
 	running  bool
@@ -89,6 +95,15 @@ type AgentConfig struct {
 	// ContextBuilder controls dynamic per-turn tool selection.
 	// If nil, all registered tools are sent every turn (current behavior).
 	ContextBuilder *ContextBuilder
+
+	// Metrics collects per-turn and per-tool execution metrics.
+	// If nil, no metrics are gathered.
+	Metrics *MetricsCollector
+
+	// ParallelTools enables concurrent execution of independent tool calls within a turn.
+	// When true, all tool calls returned by the LLM in a single turn run in parallel.
+	// Only enable this for tools with no inter-dependencies or shared mutable state.
+	ParallelTools bool
 }
 
 // NewAgent creates an Agent with the given configuration.
@@ -111,6 +126,8 @@ func NewAgent(cfg AgentConfig) *Agent {
 		subagents:      cfg.Subagents,
 		skills:         cfg.Skills,
 		contextBuilder: cfg.ContextBuilder,
+		metrics:        cfg.Metrics,
+		parallelTools:  cfg.ParallelTools,
 	}
 
 	// Register Task tool if subagents are configured
@@ -158,6 +175,9 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 		a.mu.Lock()
 		a.running = false
 		a.mu.Unlock()
+		if a.metrics != nil {
+			a.metrics.recordSessionEnd()
+		}
 		// Emit session end hook
 		if a.hooks != nil {
 			a.hooks.EmitEvent(ctx, HookEventData{
@@ -166,6 +186,10 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 			})
 		}
 	}()
+
+	if a.metrics != nil {
+		a.metrics.recordSessionStart()
+	}
 
 	// Emit session start hook
 	if a.hooks != nil {
@@ -188,8 +212,10 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 		default:
 		}
 
-		// Stream response from Claude
+		// Stream response from Claude, tracking LLM latency
+		llmStart := time.Now()
 		toolCalls, assistantContent, result, err := a.streamTurn(ctx, history, events)
+		llmLatency := time.Since(llmStart)
 		if err != nil {
 			events <- AgentEvent{Type: AgentEventError, Error: err}
 			return
@@ -226,7 +252,22 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 			})
 		}
 
-		events <- AgentEvent{Type: AgentEventTurnComplete}
+		// Record turn metrics and emit with AgentEventTurnComplete
+		var tm *TurnMetrics
+		if a.metrics != nil {
+			toolNames := make([]string, len(toolCalls))
+			for i, tc := range toolCalls {
+				toolNames[i] = tc.Name
+			}
+			recorded := TurnMetrics{
+				TurnIndex:    turn,
+				LLMLatency:   llmLatency,
+				ToolsInvoked: toolNames,
+			}
+			a.metrics.recordTurn(recorded)
+			tm = &recorded
+		}
+		events <- AgentEvent{Type: AgentEventTurnComplete, TurnMetrics: tm}
 	}
 
 	// Max turns reached
@@ -358,97 +399,16 @@ func (a *Agent) streamTurn(
 }
 
 // executeTools runs all tool calls and returns results.
+// When ParallelTools is enabled and there are multiple calls, they run concurrently.
 func (a *Agent) executeTools(
 	ctx context.Context,
 	toolCalls []ToolCall,
 	events chan<- AgentEvent,
 ) []ToolResponse {
-	results := make([]ToolResponse, 0, len(toolCalls))
-
-	for _, tc := range toolCalls {
-		var response ToolResponse
-		response.ToolUseID = tc.ID
-
-		// Check canUseTool permission callback first
-		currentInput := tc.Input
-		if a.canUseTool != nil {
-			decision := a.canUseTool(ctx, tc.Name, tc.ID, tc.Input)
-			if !decision.Allow {
-				reason := decision.Reason
-				if reason == "" {
-					reason = "permission denied"
-				}
-				response.Content = fmt.Sprintf("Tool execution denied: %s", reason)
-				response.IsError = true
-				events <- AgentEvent{
-					Type:         AgentEventToolResult,
-					ToolResponse: &response,
-				}
-				results = append(results, response)
-				continue
-			}
-			if decision.ModifiedInput != nil {
-				currentInput = decision.ModifiedInput
-			}
-		}
-
-		// Run pre-tool-use hooks
-		if a.hooks != nil {
-			hookCtx := HookContext{
-				ToolName:  tc.Name,
-				ToolUseID: tc.ID,
-				Input:     currentInput,
-			}
-			hookResult, _ := a.hooks.RunPreHooks(ctx, hookCtx)
-
-			switch hookResult.Decision { //nolint:exhaustive // HookAllow is default, no action needed
-			case HookDeny:
-				response.Content = fmt.Sprintf("Tool execution denied: %s", hookResult.Reason)
-				response.IsError = true
-				events <- AgentEvent{
-					Type:         AgentEventToolResult,
-					ToolResponse: &response,
-				}
-				results = append(results, response)
-				continue
-			case HookModify:
-				currentInput = hookResult.ModifiedInput
-			}
-		}
-
-		// Execute the tool
-		if a.tools == nil || !a.tools.Has(tc.Name) {
-			response.Content = fmt.Sprintf("Tool not found: %s", tc.Name)
-			response.IsError = true
-		} else {
-			result, err := a.tools.Execute(ctx, tc.Name, currentInput)
-			if err != nil {
-				response.Content = err.Error()
-				response.IsError = true
-			} else {
-				response.Content = result
-			}
-		}
-
-		// Run post-tool-use hooks
-		if a.hooks != nil {
-			hookCtx := HookContext{
-				ToolName:  tc.Name,
-				ToolUseID: tc.ID,
-				Input:     currentInput,
-			}
-			_ = a.hooks.RunPostHooks(ctx, hookCtx, response.Content, response.IsError)
-		}
-
-		events <- AgentEvent{
-			Type:         AgentEventToolResult,
-			ToolResponse: &response,
-		}
-
-		results = append(results, response)
+	if a.parallelTools && len(toolCalls) > 1 {
+		return runToolsParallel(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.metrics, events)
 	}
-
-	return results
+	return runToolsSequential(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.metrics, events)
 }
 
 // historyToMessages converts conversation history to Message types for CLI communication.
