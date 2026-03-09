@@ -2,7 +2,7 @@ module github.com/character-ai/claude-agent-sdk-go
 
 go 1.23.0
 
-toolchain go1.24.5
+toolchain go1.25.8
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.22.0

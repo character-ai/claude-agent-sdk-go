@@ -112,6 +112,10 @@ func main() {
 
 		case claude.AgentEventError:
 			log.Printf("error: %v", event.Error)
+
+		default:
+			// message_start, message_end, tool_use_delta, tool_use_end,
+			// complete, skills_selected — no action needed
 		}
 	}
 
