@@ -15,6 +15,7 @@ func executeOneTool(
 	tools *ToolRegistry,
 	hooks *Hooks,
 	canUseTool CanUseToolFunc,
+	retry *RetryConfig,
 	metrics *MetricsCollector,
 	events chan<- AgentEvent,
 ) ToolResponse {
@@ -64,7 +65,14 @@ func executeOneTool(
 		response.Content = fmt.Sprintf("Tool not found: %s", tc.Name)
 		response.IsError = true
 	} else {
-		result, err := tools.Execute(ctx, tc.Name, currentInput)
+		// Per-tool RetryConfig takes precedence over global
+		rc := retry
+		if perTool := tools.ToolRetryConfig(tc.Name); perTool != nil {
+			rc = perTool
+		}
+		result, err := executeWithRetry(ctx, rc, func() (string, error) {
+			return tools.Execute(ctx, tc.Name, currentInput)
+		})
 		if err != nil {
 			response.Content = err.Error()
 			response.IsError = true
@@ -94,6 +102,7 @@ func runToolsParallel(
 	tools *ToolRegistry,
 	hooks *Hooks,
 	canUseTool CanUseToolFunc,
+	retry *RetryConfig,
 	metrics *MetricsCollector,
 	events chan<- AgentEvent,
 ) []ToolResponse {
@@ -103,7 +112,7 @@ func runToolsParallel(
 		wg.Add(1)
 		go func(i int, tc ToolCall) {
 			defer wg.Done()
-			results[i] = executeOneTool(ctx, tc, tools, hooks, canUseTool, metrics, events)
+			results[i] = executeOneTool(ctx, tc, tools, hooks, canUseTool, retry, metrics, events)
 		}(i, tc)
 	}
 	wg.Wait()
@@ -117,12 +126,13 @@ func runToolsSequential(
 	tools *ToolRegistry,
 	hooks *Hooks,
 	canUseTool CanUseToolFunc,
+	retry *RetryConfig,
 	metrics *MetricsCollector,
 	events chan<- AgentEvent,
 ) []ToolResponse {
 	results := make([]ToolResponse, len(toolCalls))
 	for i, tc := range toolCalls {
-		results[i] = executeOneTool(ctx, tc, tools, hooks, canUseTool, metrics, events)
+		results[i] = executeOneTool(ctx, tc, tools, hooks, canUseTool, retry, metrics, events)
 	}
 	return results
 }

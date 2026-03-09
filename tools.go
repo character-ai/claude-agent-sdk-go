@@ -10,6 +10,10 @@ type ToolDefinition struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description"`
 	InputSchema map[string]any `json:"input_schema"`
+
+	// RetryConfig overrides the agent-level retry policy for this specific tool.
+	// If nil, the agent's global RetryConfig is used.
+	RetryConfig *RetryConfig `json:"-"`
 }
 
 // ToolCall represents a tool invocation from Claude.
@@ -107,6 +111,16 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, input json.RawM
 func (r *ToolRegistry) Has(name string) bool {
 	tool, err := r.store.GetTool(name)
 	return err == nil && tool != nil
+}
+
+// ToolRetryConfig returns the per-tool RetryConfig for the given name, or nil
+// if the tool has no override. The agent-level RetryConfig is used as fallback.
+func (r *ToolRegistry) ToolRetryConfig(name string) *RetryConfig {
+	tool, err := r.store.GetTool(name)
+	if err != nil || tool == nil {
+		return nil
+	}
+	return tool.ToolDefinition.RetryConfig
 }
 
 // GetHandler returns the handler for the given tool name.
