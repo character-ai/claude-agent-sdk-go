@@ -316,6 +316,75 @@ hooks.OnEvent(claude.HookNotification, func(ctx context.Context, data claude.Hoo
 | `HookSessionStart` | When a session begins |
 | `HookSessionEnd` | When a session ends |
 
+## Metrics
+
+The `MetricsCollector` gathers per-turn LLM latency and per-tool execution stats with no overhead when not configured. Attach it via `AgentConfig.Metrics` or `APIAgentConfig.Metrics`.
+
+```go
+mc := claude.NewMetricsCollector()
+
+agent := claude.NewAPIAgent(claude.APIAgentConfig{
+    Model:   "claude-sonnet-4-20250514",
+    Tools:   tools,
+    Metrics: mc,
+})
+
+events, _ := agent.Run(ctx, "...")
+for range events {}
+
+snap := mc.Snapshot()
+fmt.Printf("Session duration:   %v\n", snap.SessionDuration)
+fmt.Printf("Turns completed:    %d\n", len(snap.Turns))
+for _, t := range snap.Turns {
+    fmt.Printf("  turn %d: LLM=%v  tools=%v\n", t.TurnIndex, t.LLMLatency, t.ToolsInvoked)
+}
+for name, s := range snap.ToolStats {
+    fmt.Printf("  %-20s calls=%d failures=%d avg=%v\n", name, s.Calls, s.Failures, s.AvgTime())
+}
+```
+
+`Snapshot()` is safe to call concurrently with a running agent and returns a deep copy.
+
+### Live per-turn metrics in the event stream
+
+When a `MetricsCollector` is configured, every `AgentEventTurnComplete` event carries a populated `TurnMetrics` field so you can react to each turn's data immediately:
+
+```go
+for event := range events {
+    if event.Type == claude.AgentEventTurnComplete && event.TurnMetrics != nil {
+        tm := event.TurnMetrics
+        log.Printf("turn %d: LLM latency=%v tools=%v", tm.TurnIndex, tm.LLMLatency, tm.ToolsInvoked)
+    }
+}
+```
+
+### Metrics types
+
+| Type | Fields |
+|------|--------|
+| `LoopMetrics` | `SessionDuration`, `Turns []TurnMetrics`, `ToolStats map[string]*ToolStats` |
+| `TurnMetrics` | `TurnIndex int`, `LLMLatency time.Duration`, `ToolsInvoked []string` |
+| `ToolStats` | `Name`, `Calls`, `Failures`, `TotalTime`, `AvgTime() time.Duration` |
+
+## Parallel Tool Execution
+
+By default, tool calls within a turn execute sequentially. Set `ParallelTools: true` to run them all concurrently:
+
+```go
+agent := claude.NewAgent(claude.AgentConfig{
+    Tools:         tools,
+    ParallelTools: true, // all tools in a turn run concurrently
+})
+```
+
+This is also available on `APIAgentConfig.ParallelTools`.
+
+**Results always preserve input order** — if Claude invokes `[search, write, read]`, the results slice is always `[search_result, write_result, read_result]` regardless of completion order.
+
+Only enable this for **independent, side-effect-free tools**. If your tools share state, write to the same files, or must run in a specific order, keep the default (`false`).
+
+Example speedup: 3 tools each taking 100 ms run in ~100 ms parallel vs ~300 ms sequential.
+
 ## Subagents
 
 Subagents allow you to define specialized child agents that can be invoked via a `Task` tool. When you configure subagents, a `Task` tool is automatically registered that Claude can use to delegate work.
@@ -753,6 +822,8 @@ fmt.Println(server.HasTool("greet")) // Check if a tool exists
 | `Subagents` | `*SubagentConfig` | Subagent definitions for Task tool |
 | `Skills` | `*SkillRegistry` | Skill-based tool organization |
 | `ContextBuilder` | `*ContextBuilder` | Dynamic per-turn tool selection |
+| `Metrics` | `*MetricsCollector` | Collect per-turn and per-tool metrics (nil = disabled) |
+| `ParallelTools` | `bool` | Run multiple tool calls per turn concurrently (default: false) |
 
 ### APIAgentConfig
 
@@ -768,6 +839,8 @@ fmt.Println(server.HasTool("greet")) // Check if a tool exists
 | `Subagents` | `*SubagentConfig` | Subagent definitions for Task tool |
 | `Skills` | `*SkillRegistry` | Skill-based tool organization |
 | `ContextBuilder` | `*ContextBuilder` | Dynamic per-turn tool selection |
+| `Metrics` | `*MetricsCollector` | Collect per-turn and per-tool metrics (nil = disabled) |
+| `ParallelTools` | `bool` | Run multiple tool calls per turn concurrently (default: false) |
 
 ### Built-in Tool Control
 
@@ -864,7 +937,7 @@ When streaming, you'll receive events of these types:
 - `AgentEventToolUseDelta` - Tool input streaming
 - `AgentEventToolUseEnd` - Tool invocation complete
 - `AgentEventToolResult` - Tool execution result
-- `AgentEventTurnComplete` - Turn finished (tool results sent back)
+- `AgentEventTurnComplete` - Turn finished (tool results sent back); includes `TurnMetrics` when a `MetricsCollector` is configured
 - `AgentEventComplete` - Agent finished (includes `Result` with `StopReason`)
 - `AgentEventError` - Error occurred
 
@@ -879,6 +952,7 @@ See the [examples](./examples) directory:
 - [hooks](./examples/hooks) - Hook patterns: regex, timeout, lifecycle events, permissions
 - [subagents](./examples/subagents) - Subagent definitions with the Task tool
 - [skills](./examples/skills) - Skills, BM25 search, context builder, and dynamic tool selection
+- [metrics](./examples/metrics) - Per-turn LLM latency, per-tool stats, and parallel tool execution
 
 ---
 
@@ -954,6 +1028,8 @@ This Go SDK aims for feature parity with the [official Python Claude Agent SDK](
 | BM25 search | - | `BM25Index` | Go-only: zero-dependency keyword search |
 | Context builder | - | `ContextBuilder` | Go-only: dynamic per-turn tool selection |
 | Unified store | - | `Store` | Go-only: go-memdb backed indexed storage |
+| Metrics collection | - | `MetricsCollector` | Go-only: per-turn LLM latency + per-tool stats |
+| Parallel tool execution | - | `ParallelTools` | Go-only: concurrent tool calls within a turn |
 | **Extras** |
 | SSE HTTP helpers | - | `SSEWriter` | Go-only feature |
 | HTTP handler | - | `AgentHTTPHandler` | Go-only feature |
@@ -968,6 +1044,8 @@ Features available in the Go SDK but not in Python:
 4. **Type-Safe Tool Registration** - Generics-based `RegisterFunc[T]`
 5. **Skills & Context Builder** - Composable capability bundles with BM25-based dynamic tool selection
 6. **Unified Store** - `go-memdb`-backed indexed storage for tools, skills, and hooks
+7. **Metrics Collection** - `MetricsCollector` for per-turn LLM latency and per-tool execution stats
+8. **Parallel Tool Execution** - `ParallelTools` flag for concurrent tool calls within a turn
 
 ### Python-Specific Features
 
