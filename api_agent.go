@@ -26,6 +26,9 @@ type APIAgent struct {
 	contextBuilder *ContextBuilder
 	metrics        *MetricsCollector
 	parallelTools  bool
+	retry          *RetryConfig
+	budget         *BudgetConfig
+	history        *HistoryConfig
 }
 
 // APIAgentConfig configures an API-based agent.
@@ -74,6 +77,18 @@ type APIAgentConfig struct {
 	// When true, all tool calls returned by the LLM in a single turn run in parallel.
 	// Only enable this for tools with no inter-dependencies or shared mutable state.
 	ParallelTools bool
+
+	// Retry configures automatic retry behavior for tool execution failures.
+	// Per-tool RetryConfig on ToolDefinition takes precedence over this global setting.
+	Retry *RetryConfig
+
+	// Budget sets resource limits (tokens, time) for the session.
+	// The session stops with BudgetExceededError when any limit is hit.
+	// Note: MaxCostUSD is not populated for APIAgent (use MaxTokens instead).
+	Budget *BudgetConfig
+
+	// History controls conversation history compaction before each LLM call.
+	History *HistoryConfig
 }
 
 // NewAPIAgent creates an agent that uses the Anthropic API.
@@ -114,6 +129,9 @@ func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
 		contextBuilder: cfg.ContextBuilder,
 		metrics:        cfg.Metrics,
 		parallelTools:  cfg.ParallelTools,
+		retry:          cfg.Retry,
+		budget:         cfg.Budget,
+		history:        cfg.History,
 	}
 
 	// Register Task tool if subagents are configured
@@ -156,6 +174,8 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 	lastQuery := prompt
 	tools := a.buildToolsForQuery(ctx, lastQuery, events)
 
+	budget := newBudgetTracker(a.budget)
+
 	for turn := 0; turn < a.maxTurns; turn++ {
 		select {
 		case <-ctx.Done():
@@ -164,16 +184,31 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 		default:
 		}
 
+		// Check time budget before each turn
+		if err := budget.check(); err != nil {
+			events <- AgentEvent{Type: AgentEventError, Error: err}
+			return
+		}
+
 		// Rebuild tools if context builder is configured (dynamic selection per turn).
 		if a.contextBuilder != nil && turn > 0 {
 			tools = a.buildToolsForQuery(ctx, lastQuery, events)
 		}
 
+		// Apply history compaction before sending to the LLM
+		llmMessages := compactMessages(messages, a.history)
+
 		// Make streaming API call, tracking LLM latency
 		llmStart := time.Now()
-		toolCalls, assistantBlocks, err := a.streamTurn(ctx, messages, tools, events)
+		toolCalls, assistantBlocks, usage, err := a.streamTurn(ctx, llmMessages, tools, events)
 		llmLatency := time.Since(llmStart)
 		if err != nil {
+			events <- AgentEvent{Type: AgentEventError, Error: err}
+			return
+		}
+
+		// Record token usage and check budget
+		if err := budget.record(usage.InputTokens, usage.OutputTokens, 0); err != nil {
 			events <- AgentEvent{Type: AgentEventError, Error: err}
 			return
 		}
@@ -184,7 +219,7 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 			return
 		}
 
-		// Add assistant message to history
+		// Add assistant message to full history
 		messages = append(messages, anthropic.NewAssistantMessage(assistantBlocks...))
 
 		// Execute tools
@@ -269,12 +304,18 @@ func (a *APIAgent) buildToolsForQuery(ctx context.Context, query string, events 
 	return tools
 }
 
+// apiTurnUsage holds token counts from a single streaming turn.
+type apiTurnUsage struct {
+	InputTokens  int
+	OutputTokens int
+}
+
 func (a *APIAgent) streamTurn(
 	ctx context.Context,
 	messages []anthropic.MessageParam,
 	tools []anthropic.ToolUnionParam,
 	events chan<- AgentEvent,
-) ([]ToolCall, []anthropic.ContentBlockParamUnion, error) {
+) ([]ToolCall, []anthropic.ContentBlockParamUnion, apiTurnUsage, error) {
 
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(a.model),
@@ -304,6 +345,7 @@ func (a *APIAgent) streamTurn(
 		currentToolID   string
 		currentToolName string
 		currentToolJSON string
+		usage           apiTurnUsage
 	)
 
 	for stream.Next() {
@@ -369,16 +411,22 @@ func (a *APIAgent) streamTurn(
 				assistantBlocks = append(assistantBlocks, anthropic.NewTextBlock(currentText))
 				currentText = ""
 			}
+
+		case anthropic.MessageStartEvent:
+			usage.InputTokens = int(e.Message.Usage.InputTokens)
+
+		case anthropic.MessageDeltaEvent:
+			usage.OutputTokens = int(e.Usage.OutputTokens)
 		}
 	}
 
 	if err := stream.Err(); err != nil {
-		return nil, nil, fmt.Errorf("stream error: %w", err)
+		return nil, nil, apiTurnUsage{}, fmt.Errorf("stream error: %w", err)
 	}
 
 	events <- AgentEvent{Type: AgentEventMessageEnd}
 
-	return toolCalls, assistantBlocks, nil
+	return toolCalls, assistantBlocks, usage, nil
 }
 
 func (a *APIAgent) executeTools(
@@ -387,9 +435,9 @@ func (a *APIAgent) executeTools(
 	events chan<- AgentEvent,
 ) []ToolResponse {
 	if a.parallelTools && len(toolCalls) > 1 {
-		return runToolsParallel(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.metrics, events)
+		return runToolsParallel(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.retry, a.metrics, events)
 	}
-	return runToolsSequential(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.metrics, events)
+	return runToolsSequential(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.retry, a.metrics, events)
 }
 
 // RunSync executes the agent and returns all text output.

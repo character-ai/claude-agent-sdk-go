@@ -385,6 +385,114 @@ Only enable this for **independent, side-effect-free tools**. If your tools shar
 
 Example speedup: 3 tools each taking 100 ms run in ~100 ms parallel vs ~300 ms sequential.
 
+## Retry Logic
+
+`RetryConfig` adds automatic retry with exponential backoff to tool execution. Configure it globally on the agent or per-tool on `ToolDefinition` — the per-tool setting takes precedence.
+
+```go
+// Global retry: all tools retry up to 3 times with 500 ms base backoff
+agent := claude.NewAPIAgent(claude.APIAgentConfig{
+    Tools: tools,
+    Retry: &claude.RetryConfig{
+        MaxAttempts: 3,
+        Backoff:     500 * time.Millisecond,
+        RetryOn: func(err error) bool {
+            // Only retry on transient errors; stop immediately on permanent ones
+            return strings.Contains(err.Error(), "rate limit") ||
+                strings.Contains(err.Error(), "timeout")
+        },
+    },
+})
+```
+
+Per-tool override — useful when one tool is flaky but others should fail fast:
+
+```go
+claude.RegisterFunc(tools, claude.ToolDefinition{
+    Name:        "external_api",
+    Description: "Call an external API",
+    InputSchema: claude.ObjectSchema(map[string]any{
+        "endpoint": claude.StringParam("API endpoint"),
+    }, "endpoint"),
+    RetryConfig: &claude.RetryConfig{
+        MaxAttempts: 5,
+        Backoff:     time.Second,
+        // nil RetryOn means retry on any error
+    },
+}, handler)
+```
+
+**Backoff schedule** for `Backoff: 500ms, MaxAttempts: 4`:
+`0 ms` → fail → `500 ms` → fail → `1 s` → fail → `2 s` → fail → error returned
+
+When `RetryOn` is nil, all errors are retried. Set `MaxAttempts: 1` (or `0`) to disable retry entirely.
+
+## Budget Controls
+
+`BudgetConfig` stops the session with a `*BudgetExceededError` when any resource limit is hit. All three limits are independent; any zero value means unlimited.
+
+```go
+agent := claude.NewAPIAgent(claude.APIAgentConfig{
+    Budget: &claude.BudgetConfig{
+        MaxTokens:   50_000,            // cumulative input+output tokens
+        MaxCostUSD:  0.50,              // cumulative cost in USD (Agent/CLI only)
+        MaxDuration: 2 * time.Minute,   // wall-clock session time
+    },
+})
+```
+
+Detect the error in the event stream:
+
+```go
+for event := range events {
+    if event.Type == claude.AgentEventError {
+        var budgetErr *claude.BudgetExceededError
+        if errors.As(event.Error, &budgetErr) {
+            log.Printf("session stopped: %v", budgetErr)
+        }
+    }
+}
+```
+
+| Limit | `Agent` (CLI) | `APIAgent` |
+|-------|--------------|-----------|
+| `MaxTokens` | ✓ via `ResultMessage.Usage` | ✓ via streaming events |
+| `MaxCostUSD` | ✓ via `ResultMessage.Cost` | — (not available) |
+| `MaxDuration` | ✓ | ✓ |
+
+## History Compaction
+
+`HistoryConfig` prevents context-window growth in long sessions by compacting the conversation history sent to the LLM on each turn. The full history is always kept in memory — only the LLM's view is trimmed.
+
+```go
+agent := claude.NewAgent(claude.AgentConfig{
+    History: &claude.HistoryConfig{
+        // Only include the last 5 turns in each LLM call.
+        // The initial user prompt is always preserved.
+        MaxTurns: 5,
+
+        // Replace tool-result content in older turns with a placeholder.
+        // Saves tokens while keeping the conversation structure valid.
+        // (CLI Agent only; use MaxTurns for APIAgent.)
+        DropToolResults: true,
+    },
+})
+```
+
+With `MaxTurns: 3` and a 6-turn history, the LLM receives:
+
+```
+[user]       initial prompt          ← always kept
+[assistant]  turn 4 response
+[tool]       turn 4 result
+[assistant]  turn 5 response
+[tool]       turn 5 result
+[assistant]  turn 6 response
+[tool]       turn 6 result
+```
+
+Turns 1–3 are omitted. With `DropToolResults: true`, the tool-result lines in older kept turns are replaced with `[tool result omitted]`.
+
 ## Subagents
 
 Subagents allow you to define specialized child agents that can be invoked via a `Task` tool. When you configure subagents, a `Task` tool is automatically registered that Claude can use to delegate work.
@@ -824,6 +932,9 @@ fmt.Println(server.HasTool("greet")) // Check if a tool exists
 | `ContextBuilder` | `*ContextBuilder` | Dynamic per-turn tool selection |
 | `Metrics` | `*MetricsCollector` | Collect per-turn and per-tool metrics (nil = disabled) |
 | `ParallelTools` | `bool` | Run multiple tool calls per turn concurrently (default: false) |
+| `Retry` | `*RetryConfig` | Global retry policy for tool execution (nil = no retry) |
+| `Budget` | `*BudgetConfig` | Resource limits: tokens, cost, time (nil = unlimited) |
+| `History` | `*HistoryConfig` | History compaction to bound context window (nil = disabled) |
 
 ### APIAgentConfig
 
@@ -841,6 +952,9 @@ fmt.Println(server.HasTool("greet")) // Check if a tool exists
 | `ContextBuilder` | `*ContextBuilder` | Dynamic per-turn tool selection |
 | `Metrics` | `*MetricsCollector` | Collect per-turn and per-tool metrics (nil = disabled) |
 | `ParallelTools` | `bool` | Run multiple tool calls per turn concurrently (default: false) |
+| `Retry` | `*RetryConfig` | Global retry policy for tool execution (nil = no retry) |
+| `Budget` | `*BudgetConfig` | Resource limits: tokens, time (nil = unlimited) |
+| `History` | `*HistoryConfig` | History compaction to bound context window (nil = disabled) |
 
 ### Built-in Tool Control
 
@@ -953,6 +1067,7 @@ See the [examples](./examples) directory:
 - [subagents](./examples/subagents) - Subagent definitions with the Task tool
 - [skills](./examples/skills) - Skills, BM25 search, context builder, and dynamic tool selection
 - [metrics](./examples/metrics) - Per-turn LLM latency, per-tool stats, and parallel tool execution
+- [resilience](./examples/resilience) - Retry logic, budget controls, and history compaction
 
 ---
 
@@ -1030,6 +1145,9 @@ This Go SDK aims for feature parity with the [official Python Claude Agent SDK](
 | Unified store | - | `Store` | Go-only: go-memdb backed indexed storage |
 | Metrics collection | - | `MetricsCollector` | Go-only: per-turn LLM latency + per-tool stats |
 | Parallel tool execution | - | `ParallelTools` | Go-only: concurrent tool calls within a turn |
+| Retry logic | - | `RetryConfig` | Go-only: per-tool exponential backoff |
+| Budget controls | - | `BudgetConfig` | Go-only: token, cost, and time limits |
+| History compaction | - | `HistoryConfig` | Go-only: rolling window + tool-result pruning |
 | **Extras** |
 | SSE HTTP helpers | - | `SSEWriter` | Go-only feature |
 | HTTP handler | - | `AgentHTTPHandler` | Go-only feature |
@@ -1046,6 +1164,9 @@ Features available in the Go SDK but not in Python:
 6. **Unified Store** - `go-memdb`-backed indexed storage for tools, skills, and hooks
 7. **Metrics Collection** - `MetricsCollector` for per-turn LLM latency and per-tool execution stats
 8. **Parallel Tool Execution** - `ParallelTools` flag for concurrent tool calls within a turn
+9. **Retry Logic** - `RetryConfig` with exponential backoff, configurable globally or per-tool
+10. **Budget Controls** - `BudgetConfig` with token, cost, and time limits per session
+11. **History Compaction** - `HistoryConfig` rolling window to keep context window bounded
 
 ### Python-Specific Features
 

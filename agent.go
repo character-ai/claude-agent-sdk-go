@@ -62,6 +62,9 @@ type Agent struct {
 	contextBuilder *ContextBuilder
 	metrics        *MetricsCollector
 	parallelTools  bool
+	retry          *RetryConfig
+	budget         *BudgetConfig
+	history        *HistoryConfig
 
 	mu       sync.Mutex
 	running  bool
@@ -104,6 +107,18 @@ type AgentConfig struct {
 	// When true, all tool calls returned by the LLM in a single turn run in parallel.
 	// Only enable this for tools with no inter-dependencies or shared mutable state.
 	ParallelTools bool
+
+	// Retry configures automatic retry behavior for tool execution failures.
+	// Per-tool RetryConfig on ToolDefinition takes precedence over this global setting.
+	Retry *RetryConfig
+
+	// Budget sets resource limits (tokens, cost, time) for the session.
+	// The session stops with BudgetExceededError when any limit is hit.
+	Budget *BudgetConfig
+
+	// History controls conversation history compaction before each LLM call,
+	// preventing unbounded context growth in long sessions.
+	History *HistoryConfig
 }
 
 // NewAgent creates an Agent with the given configuration.
@@ -128,6 +143,9 @@ func NewAgent(cfg AgentConfig) *Agent {
 		contextBuilder: cfg.ContextBuilder,
 		metrics:        cfg.Metrics,
 		parallelTools:  cfg.ParallelTools,
+		retry:          cfg.Retry,
+		budget:         cfg.Budget,
+		history:        cfg.History,
 	}
 
 	// Register Task tool if subagents are configured
@@ -204,6 +222,8 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 		{Role: "user", Content: prompt},
 	}
 
+	budget := newBudgetTracker(a.budget)
+
 	for turn := 0; turn < a.maxTurns; turn++ {
 		select {
 		case <-ctx.Done():
@@ -212,13 +232,30 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 		default:
 		}
 
+		// Check time budget before each turn
+		if err := budget.check(); err != nil {
+			events <- AgentEvent{Type: AgentEventError, Error: err}
+			return
+		}
+
+		// Apply history compaction before sending to the LLM
+		llmHistory := compactHistory(history, a.history)
+
 		// Stream response from Claude, tracking LLM latency
 		llmStart := time.Now()
-		toolCalls, assistantContent, result, err := a.streamTurn(ctx, history, events)
+		toolCalls, assistantContent, result, err := a.streamTurn(ctx, llmHistory, events)
 		llmLatency := time.Since(llmStart)
 		if err != nil {
 			events <- AgentEvent{Type: AgentEventError, Error: err}
 			return
+		}
+
+		// Record token/cost usage and check budget
+		if result != nil {
+			if err := budget.record(result.InputTokens, result.OutputTokens, result.Cost); err != nil {
+				events <- AgentEvent{Type: AgentEventError, Error: err}
+				return
+			}
 		}
 
 		// No tool calls = we're done
@@ -233,7 +270,7 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 			return
 		}
 
-		// Add assistant message to history
+		// Add assistant message to full history
 		history = append(history, ConversationMessage{
 			Role:      "assistant",
 			Content:   assistantContent,
@@ -243,7 +280,7 @@ func (a *Agent) runLoop(ctx context.Context, prompt string, events chan<- AgentE
 		// Execute tools and collect results
 		toolResults := a.executeTools(ctx, toolCalls, events)
 
-		// Add tool results to history
+		// Add tool results to full history
 		for _, tr := range toolResults {
 			history = append(history, ConversationMessage{
 				Role:       "tool",
@@ -406,9 +443,9 @@ func (a *Agent) executeTools(
 	events chan<- AgentEvent,
 ) []ToolResponse {
 	if a.parallelTools && len(toolCalls) > 1 {
-		return runToolsParallel(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.metrics, events)
+		return runToolsParallel(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.retry, a.metrics, events)
 	}
-	return runToolsSequential(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.metrics, events)
+	return runToolsSequential(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.retry, a.metrics, events)
 }
 
 // historyToMessages converts conversation history to Message types for CLI communication.
