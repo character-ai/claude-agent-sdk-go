@@ -5,6 +5,40 @@ import (
 	"testing"
 )
 
+func TestParseEventResultUsageAndCost(t *testing.T) {
+	c := &Client{}
+	line := `{"type":"result","subtype":"success","is_error":false,"duration_ms":2653,"num_turns":1,"result":"hi","stop_reason":"end_turn","session_id":"fc708dfc","total_cost_usd":0.07687225,"usage":{"input_tokens":3,"cache_creation_input_tokens":11759,"cache_read_input_tokens":6527,"output_tokens":4,"server_tool_use":{"web_search_requests":0},"service_tier":"standard"}}`
+	event := c.parseEvent(line)
+
+	if event.Type != EventResult {
+		t.Fatalf("expected result event, got %q", event.Type)
+	}
+	if event.Result == nil {
+		t.Fatal("expected result to be non-nil")
+	}
+	if event.Result.Cost == 0 {
+		t.Fatal("expected non-zero cost")
+	}
+	if event.Result.Cost < 0.076 || event.Result.Cost > 0.077 {
+		t.Fatalf("expected cost ~0.0769, got %f", event.Result.Cost)
+	}
+	if event.Result.InputTokens != 3 {
+		t.Fatalf("expected 3 input tokens, got %d", event.Result.InputTokens)
+	}
+	if event.Result.OutputTokens != 4 {
+		t.Fatalf("expected 4 output tokens, got %d", event.Result.OutputTokens)
+	}
+	if event.Result.Usage == nil {
+		t.Fatal("expected usage to be non-nil")
+	}
+	if event.Result.Usage.CacheCreationInputTokens != 11759 {
+		t.Fatalf("expected 11759 cache creation tokens, got %d", event.Result.Usage.CacheCreationInputTokens)
+	}
+	if event.Result.Usage.CacheReadInputTokens != 6527 {
+		t.Fatalf("expected 6527 cache read tokens, got %d", event.Result.Usage.CacheReadInputTokens)
+	}
+}
+
 func TestParseEventTextDelta(t *testing.T) {
 	c := &Client{}
 	line := `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}`
