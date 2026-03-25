@@ -173,4 +173,3 @@ func formatTodoSummary(items []TodoItem) string {
 	}
 	return strings.Join(parts, ", ") + "."
 }
-

@@ -27,7 +27,7 @@ func main() {
 	}
 
 	for event := range events {
-		switch event.Type {
+		switch event.Type { //nolint:exhaustive // Only handling events we care about
 		case claude.AgentEventContentDelta:
 			fmt.Print(event.Content)
 
