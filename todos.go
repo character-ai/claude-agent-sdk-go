@@ -114,7 +114,7 @@ func ReadTodosToolDefinition() ToolDefinition {
 		Description: `Read the current todo list. Use this to refresh your knowledge of ` +
 			`pending work, especially after long conversations where earlier context ` +
 			`may have been compressed.`,
-		InputSchema: ObjectSchema(map[string]any{}, /* no required fields */),
+		InputSchema: ObjectSchema(map[string]any{} /* no required fields */),
 	}
 }
 
@@ -179,7 +179,7 @@ func validateTodos(items []TodoItem) error {
 	return nil
 }
 
-// initTodoStore initialises the TodoStore and registers todo tools on the
+// initTodoStore initializes the TodoStore and registers todo tools on the
 // given registry. Returns the store. This is the shared init path for both
 // Agent and APIAgent.
 func initTodoStore(registry *ToolRegistry, cfg *TodoStore) *TodoStore {
