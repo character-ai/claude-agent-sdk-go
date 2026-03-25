@@ -7,6 +7,9 @@ import (
 	"sync"
 )
 
+// TodoToolName is the registered name of the write_todos tool.
+const TodoToolName = "write_todos"
+
 // TodoStatus represents the state of a todo item.
 type TodoStatus string
 
@@ -72,7 +75,7 @@ type writeTodosInput struct {
 // TodosToolDefinition returns the ToolDefinition for the write_todos tool.
 func TodosToolDefinition() ToolDefinition {
 	return ToolDefinition{
-		Name: "write_todos",
+		Name: TodoToolName,
 		Description: `Write and manage a todo list to plan and track your work. ` +
 			`Each call replaces the entire list. Use this to break down complex tasks, ` +
 			`track progress, and organize subtasks. ` +
@@ -106,10 +109,15 @@ func TodosToolDefinition() ToolDefinition {
 func RegisterTodosTool(registry *ToolRegistry, store *TodoStore, emitEvent func([]TodoItem)) {
 	RegisterFunc(registry, TodosToolDefinition(), func(_ context.Context, input writeTodosInput) (string, error) {
 		// Validate items
+		seen := make(map[string]bool, len(input.Todos))
 		for i, item := range input.Todos {
 			if item.ID == "" {
 				return "", fmt.Errorf("todo at index %d: id is required", i)
 			}
+			if seen[item.ID] {
+				return "", fmt.Errorf("todo at index %d: duplicate id %q", i, item.ID)
+			}
+			seen[item.ID] = true
 			if item.Description == "" {
 				return "", fmt.Errorf("todo %q: description is required", item.ID)
 			}

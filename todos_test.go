@@ -67,8 +67,8 @@ func TestTodoStoreEmpty(t *testing.T) {
 
 func TestTodosToolDefinition(t *testing.T) {
 	def := TodosToolDefinition()
-	if def.Name != "write_todos" {
-		t.Fatalf("expected name 'write_todos', got %q", def.Name)
+	if def.Name != TodoToolName {
+		t.Fatalf("expected name %q, got %q", TodoToolName, def.Name)
 	}
 	if def.InputSchema == nil {
 		t.Fatal("expected non-nil InputSchema")
@@ -91,7 +91,7 @@ func TestRegisterTodosToolHandler(t *testing.T) {
 		emittedItems = items
 	})
 
-	if !registry.Has("write_todos") {
+	if !registry.Has(TodoToolName) {
 		t.Fatal("write_todos tool not registered")
 	}
 
@@ -156,6 +156,15 @@ func TestTodosToolValidation(t *testing.T) {
 			name: "invalid priority",
 			input: writeTodosInput{
 				Todos: []TodoItem{{ID: "1", Description: "task", Status: TodoStatusPending, Priority: "bad"}},
+			},
+		},
+		{
+			name: "duplicate ID",
+			input: writeTodosInput{
+				Todos: []TodoItem{
+					{ID: "1", Description: "first", Status: TodoStatusPending, Priority: TodoPriorityHigh},
+					{ID: "1", Description: "second", Status: TodoStatusPending, Priority: TodoPriorityLow},
+				},
 			},
 		},
 	}
@@ -244,7 +253,7 @@ func TestAgentConfigEnableTodos(t *testing.T) {
 	if agent.todoStore == nil {
 		t.Fatal("expected todoStore to be created when EnableTodos is true")
 	}
-	if !agent.tools.Has("write_todos") {
+	if !agent.tools.Has(TodoToolName) {
 		t.Fatal("expected write_todos tool to be registered")
 	}
 	if agent.TodoStore() == nil {
@@ -258,7 +267,7 @@ func TestAgentConfigDisabledTodos(t *testing.T) {
 	if agent.todoStore != nil {
 		t.Fatal("expected todoStore to be nil when EnableTodos is false")
 	}
-	if agent.tools.Has("write_todos") {
+	if agent.tools.Has(TodoToolName) {
 		t.Fatal("expected write_todos tool to not be registered")
 	}
 	if agent.TodoStore() != nil {
@@ -283,5 +292,62 @@ func TestAgentConfigSharedTodoStore(t *testing.T) {
 	items := agent.TodoStore().List()
 	if len(items) != 1 || items[0].ID != "pre" {
 		t.Fatal("expected to see pre-existing items from shared store")
+	}
+}
+
+func TestAPIAgentConfigEnableTodos(t *testing.T) {
+	agent := NewAPIAgent(APIAgentConfig{
+		EnableTodos: true,
+	})
+
+	if agent.todoStore == nil {
+		t.Fatal("expected todoStore to be created when EnableTodos is true")
+	}
+	if !agent.tools.Has(TodoToolName) {
+		t.Fatal("expected write_todos tool to be registered")
+	}
+	if agent.TodoStore() == nil {
+		t.Fatal("expected TodoStore() to return non-nil")
+	}
+}
+
+func TestAPIAgentConfigDisabledTodos(t *testing.T) {
+	agent := NewAPIAgent(APIAgentConfig{})
+
+	if agent.todoStore != nil {
+		t.Fatal("expected todoStore to be nil when EnableTodos is false")
+	}
+	if agent.tools.Has(TodoToolName) {
+		t.Fatal("expected write_todos tool to not be registered")
+	}
+	if agent.TodoStore() != nil {
+		t.Fatal("expected TodoStore() to return nil")
+	}
+}
+
+func TestAPIAgentConfigSharedTodoStore(t *testing.T) {
+	shared := NewTodoStore()
+	shared.Write([]TodoItem{
+		{ID: "pre", Description: "pre-existing", Status: TodoStatusPending, Priority: TodoPriorityHigh},
+	})
+
+	agent := NewAPIAgent(APIAgentConfig{
+		EnableTodos: true,
+		TodoStore:   shared,
+	})
+
+	if agent.todoStore != shared {
+		t.Fatal("expected agent to use the shared TodoStore")
+	}
+	items := agent.TodoStore().List()
+	if len(items) != 1 || items[0].ID != "pre" {
+		t.Fatal("expected to see pre-existing items from shared store")
+	}
+}
+
+func TestTodoToolNameConst(t *testing.T) {
+	def := TodosToolDefinition()
+	if def.Name != TodoToolName {
+		t.Fatalf("TodosToolDefinition().Name = %q, want %q", def.Name, TodoToolName)
 	}
 }

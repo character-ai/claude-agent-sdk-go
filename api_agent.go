@@ -262,15 +262,19 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 		// Execute tools
 		toolResults := a.executeTools(ctx, toolCalls, events)
 
-		// Emit todos update if write_todos was called this turn
+		// Emit todos update if write_todos succeeded this turn
 		if a.todoStore != nil {
-			for _, tc := range toolCalls {
-				if tc.Name == "write_todos" {
-					events <- AgentEvent{
-						Type:  AgentEventTodosUpdated,
-						Todos: a.todoStore.List(),
+			for _, tr := range toolResults {
+				if !tr.IsError {
+					for _, tc := range toolCalls {
+						if tc.ID == tr.ToolUseID && tc.Name == TodoToolName {
+							events <- AgentEvent{
+								Type:  AgentEventTodosUpdated,
+								Todos: a.todoStore.List(),
+							}
+							break
+						}
 					}
-					break
 				}
 			}
 		}
