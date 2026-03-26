@@ -367,6 +367,28 @@ func TestEmitTodoEvents(t *testing.T) {
 			t.Fatalf("expected 0 events for nil store, got %d", len(got))
 		}
 	})
+
+	t.Run("multiple write_todos emits only once", func(t *testing.T) {
+		events := make(chan AgentEvent, 10)
+		calls := []ToolCall{
+			{ID: "tc1", Name: TodoToolName},
+			{ID: "tc2", Name: TodoToolName},
+		}
+		results := []ToolResponse{
+			{ToolUseID: "tc1", Content: "ok"},
+			{ToolUseID: "tc2", Content: "ok"},
+		}
+		emitTodoEvents(store, calls, results, events)
+		close(events)
+
+		var got []AgentEvent
+		for e := range events {
+			got = append(got, e)
+		}
+		if len(got) != 1 {
+			t.Fatalf("expected exactly 1 event for multiple write_todos, got %d", len(got))
+		}
+	})
 }
 
 func TestInitTodoStore(t *testing.T) {
