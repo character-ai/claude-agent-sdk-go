@@ -10,6 +10,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+#### Artifact System (`ArtifactRegistry`)
+
+An in-memory artifact system that lets agents generate self-contained HTML, JSX, or text content — similar to Claude.ai's artifacts.
+
+- **Typed artifacts** — `html`, `jsx`, or `text` with validation
+- **Two tools** — `create_artifact` and `update_artifact`, auto-registered via `Tools()`
+- **System prompt** — `SystemPrompt()` returns instructions that teach the agent when/how to produce artifacts
+- **Versioned** — each update increments the version; `UpdatedAt` tracks last modification
+- **Thread-safe** — safe for concurrent access; tools registry is cached after first `Tools()` call
+- **Ordered** — `All()` returns artifacts in creation order
+
+```go
+artifacts := claude.NewArtifactRegistry()
+
+agent := claude.NewAPIAgent(claude.APIAgentConfig{
+    Tools:        artifacts.Tools(),
+    SystemPrompt: artifacts.SystemPrompt(),
+})
+
+events, _ := agent.Run(ctx, "Create an interactive dashboard")
+for range events {} // drain
+
+for _, a := range artifacts.All() {
+    // a.ID, a.Type ("html"|"jsx"|"text"), a.Title, a.Content
+}
+```
+
+New types: `Artifact`, `ArtifactType`, `ArtifactRegistry`.
+New constants: `ArtifactHTML`, `ArtifactJSX`, `ArtifactText`.
+
 #### Todo Tracking (`EnableTodos` / `TodoStore`)
 
 A built-in `write_todos` tool that lets the agent plan and track its own work.

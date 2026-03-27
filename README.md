@@ -1121,6 +1121,7 @@ See the [examples](./examples) directory:
 - [metrics](./examples/metrics) - Per-turn LLM latency, per-tool stats, and parallel tool execution
 - [resilience](./examples/resilience) - Retry logic, budget controls, and history compaction
 - [todos](./examples/todos) - Built-in todo tracking with AgentEventTodosUpdated
+- [artifacts](./examples/artifacts) - Artifact generation (HTML/JSX/text) with API agent
 
 ---
 
@@ -1202,6 +1203,7 @@ This Go SDK aims for feature parity with the [official Python Claude Agent SDK](
 | Budget controls | - | `BudgetConfig` | Go-only: token, cost, and time limits |
 | History compaction | - | `HistoryConfig` | Go-only: rolling window + tool-result pruning |
 | Todo tracking | - | `EnableTodos` / `TodoStore` | Go-only: built-in write_todos tool for agent self-planning |
+| Artifact generation | - | `ArtifactRegistry` | Go-only: in-memory HTML/JSX/text artifact system |
 | **Extras** |
 | SSE HTTP helpers | - | `SSEWriter` | Go-only feature |
 | HTTP handler | - | `AgentHTTPHandler` | Go-only feature |
@@ -1222,6 +1224,7 @@ Features available in the Go SDK but not in Python:
 10. **Budget Controls** - `BudgetConfig` with token, cost, and time limits per session
 11. **History Compaction** - `HistoryConfig` rolling window to keep context window bounded
 12. **Todo Tracking** - `EnableTodos` / `TodoStore` for agent self-planning with `AgentEventTodosUpdated` events
+13. **Artifact Generation** - `ArtifactRegistry` for generating self-contained HTML, JSX, or text artifacts
 
 ### Python-Specific Features
 

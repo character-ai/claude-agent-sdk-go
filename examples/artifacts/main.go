@@ -1,0 +1,76 @@
+// Artifacts example showing how to generate HTML/JSX/text content with an API agent.
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+
+	claude "github.com/character-ai/claude-agent-sdk-go"
+)
+
+func main() {
+	ctx := context.Background()
+
+	// Create artifact registry — holds generated artifacts and provides tools
+	artifacts := claude.NewArtifactRegistry()
+
+	// Create API agent with artifact tools
+	agent := claude.NewAPIAgent(claude.APIAgentConfig{
+		Model:        "claude-sonnet-4-20250514",
+		SystemPrompt: artifacts.SystemPrompt(),
+		Tools:        artifacts.Tools(),
+		MaxTurns:     5,
+	})
+
+	prompt := "Create an interactive HTML page with a bouncing ball animation using canvas. Make it colorful."
+	if len(os.Args) > 1 {
+		prompt = os.Args[1]
+	}
+
+	fmt.Println("Prompt:", prompt)
+	fmt.Println()
+
+	events, err := agent.Run(ctx, prompt)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Stream events
+	for event := range events {
+		switch event.Type { //nolint:exhaustive // Only handling events we care about
+		case claude.AgentEventContentDelta:
+			fmt.Print(event.Content)
+		case claude.AgentEventToolUseStart:
+			fmt.Printf("\n[calling %s]\n", event.ToolCall.Name)
+		case claude.AgentEventToolResult:
+			fmt.Printf("[%s]\n", event.ToolResponse.Content)
+		case claude.AgentEventError:
+			fmt.Printf("Error: %v\n", event.Error)
+		}
+	}
+
+	// Write artifacts to a temp directory
+	fmt.Printf("\n\n=== %d Artifact(s) Generated ===\n", artifacts.Count())
+	outDir, err := os.MkdirTemp("", "artifacts-*")
+	if err != nil {
+		log.Fatalf("failed to create temp dir: %v", err)
+	}
+	for _, a := range artifacts.All() {
+		ext := ".txt"
+		switch a.Type { //nolint:exhaustive // text uses default
+		case claude.ArtifactHTML:
+			ext = ".html"
+		case claude.ArtifactJSX:
+			ext = ".jsx"
+		}
+		path := filepath.Join(outDir, a.ID+ext)
+		if err := os.WriteFile(path, []byte(a.Content), 0600); err != nil {
+			fmt.Printf("Failed to write %s: %v\n", path, err)
+			continue
+		}
+		fmt.Printf("Wrote %s (%s, %d bytes) -> %s\n", a.Title, a.Type, len(a.Content), path)
+	}
+}
