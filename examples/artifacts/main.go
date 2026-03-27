@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	claude "github.com/character-ai/claude-agent-sdk-go"
 )
@@ -51,8 +52,12 @@ func main() {
 		}
 	}
 
-	// Write artifacts to files
+	// Write artifacts to a temp directory
 	fmt.Printf("\n\n=== %d Artifact(s) Generated ===\n", artifacts.Count())
+	outDir, err := os.MkdirTemp("", "artifacts-*")
+	if err != nil {
+		log.Fatalf("failed to create temp dir: %v", err)
+	}
 	for _, a := range artifacts.All() {
 		ext := ".txt"
 		switch a.Type {
@@ -61,11 +66,11 @@ func main() {
 		case claude.ArtifactJSX:
 			ext = ".jsx"
 		}
-		filename := a.ID + ext
-		if err := os.WriteFile(filename, []byte(a.Content), 0644); err != nil {
-			fmt.Printf("Failed to write %s: %v\n", filename, err)
+		path := filepath.Join(outDir, a.ID+ext)
+		if err := os.WriteFile(path, []byte(a.Content), 0644); err != nil {
+			fmt.Printf("Failed to write %s: %v\n", path, err)
 			continue
 		}
-		fmt.Printf("Wrote %s (%s, %d bytes) -> %s\n", a.Title, a.Type, len(a.Content), filename)
+		fmt.Printf("Wrote %s (%s, %d bytes) -> %s\n", a.Title, a.Type, len(a.Content), path)
 	}
 }

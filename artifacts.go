@@ -2,7 +2,6 @@ package claudeagent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -34,6 +33,7 @@ type ArtifactRegistry struct {
 	artifacts map[string]*Artifact
 	order     []string // insertion order
 	nextID    int
+	tools     *ToolRegistry // cached, created once
 }
 
 // NewArtifactRegistry creates a new artifact registry.
@@ -44,10 +44,17 @@ func NewArtifactRegistry() *ArtifactRegistry {
 }
 
 // Tools returns a ToolRegistry with create_artifact and update_artifact tools.
+// The registry is created once and cached — subsequent calls return the same instance.
 func (r *ArtifactRegistry) Tools() *ToolRegistry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tools != nil {
+		return r.tools
+	}
+
 	tools := NewToolRegistry()
 
-	tools.Register(ToolDefinition{
+	RegisterFunc(tools, ToolDefinition{
 		Name:        "create_artifact",
 		Description: "Create a new artifact. Use this to generate HTML pages, JSX components, or text content. Each artifact is a self-contained piece of content.",
 		InputSchema: ObjectSchema(map[string]any{
@@ -57,7 +64,7 @@ func (r *ArtifactRegistry) Tools() *ToolRegistry {
 		}, "type", "title", "content"),
 	}, r.handleCreate)
 
-	tools.Register(ToolDefinition{
+	RegisterFunc(tools, ToolDefinition{
 		Name:        "update_artifact",
 		Description: "Update an existing artifact by replacing its content entirely. Use when the user asks to modify a previously created artifact.",
 		InputSchema: ObjectSchema(map[string]any{
@@ -67,6 +74,7 @@ func (r *ArtifactRegistry) Tools() *ToolRegistry {
 		}, "id", "content"),
 	}, r.handleUpdate)
 
+	r.tools = tools
 	return tools
 }
 
@@ -82,12 +90,7 @@ type updateInput struct {
 	Content string `json:"content"`
 }
 
-func (r *ArtifactRegistry) handleCreate(_ context.Context, raw json.RawMessage) (string, error) {
-	var input createInput
-	if err := json.Unmarshal(raw, &input); err != nil {
-		return "", fmt.Errorf("invalid input: %w", err)
-	}
-
+func (r *ArtifactRegistry) handleCreate(_ context.Context, input createInput) (string, error) {
 	switch input.Type {
 	case ArtifactHTML, ArtifactJSX, ArtifactText:
 	default:
@@ -102,6 +105,7 @@ func (r *ArtifactRegistry) handleCreate(_ context.Context, raw json.RawMessage) 
 	}
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.nextID++
 	id := fmt.Sprintf("artifact_%d", r.nextID)
 	now := time.Now()
@@ -116,25 +120,19 @@ func (r *ArtifactRegistry) handleCreate(_ context.Context, raw json.RawMessage) 
 	}
 	r.artifacts[id] = a
 	r.order = append(r.order, id)
-	r.mu.Unlock()
 
 	return fmt.Sprintf("Created artifact %q (id: %s, type: %s, %d bytes)", a.Title, id, input.Type, len(input.Content)), nil
 }
 
-func (r *ArtifactRegistry) handleUpdate(_ context.Context, raw json.RawMessage) (string, error) {
-	var input updateInput
-	if err := json.Unmarshal(raw, &input); err != nil {
-		return "", fmt.Errorf("invalid input: %w", err)
-	}
-
+func (r *ArtifactRegistry) handleUpdate(_ context.Context, input updateInput) (string, error) {
 	if input.Content == "" {
 		return "", fmt.Errorf("content is required")
 	}
 
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	a, ok := r.artifacts[input.ID]
 	if !ok {
-		r.mu.Unlock()
 		return "", fmt.Errorf("artifact not found: %s", input.ID)
 	}
 	a.Content = input.Content
@@ -143,7 +141,6 @@ func (r *ArtifactRegistry) handleUpdate(_ context.Context, raw json.RawMessage) 
 	if input.Title != "" {
 		a.Title = input.Title
 	}
-	r.mu.Unlock()
 
 	return fmt.Sprintf("Updated artifact %q (id: %s, version: %d, %d bytes)", a.Title, a.ID, a.Version, len(a.Content)), nil
 }
