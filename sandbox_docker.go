@@ -85,10 +85,7 @@ func (b *DockerBackend) CreateSession(ctx context.Context, opts SessionOptions) 
 		"--workdir", workDir,
 		fmt.Sprintf("--memory=%dm", opts.Limits.MemoryMB),
 		"--oom-kill-disable=false",
-	}
-	if opts.Limits.CPUSeconds > 0 {
-		// Approximate CPU limit using cpu-period and cpu-quota.
-		args = append(args, "--cpus=1")
+		"--cpus=1",
 	}
 	args = append(args, image, "sleep", "3600") // keep container alive
 
@@ -217,15 +214,8 @@ func (s *dockerSession) RunCommand(ctx context.Context, command string) (*ExecRe
 	return s.dockerExecCmd(ctx, command)
 }
 
-// safePath resolves a path within the container working directory and ensures
-// it does not escape via traversal.
 func (s *dockerSession) safePath(path string) (string, error) {
-	fullPath := filepath.Join(s.workDir, path)
-	cleanWork := filepath.Clean(s.workDir) + string(filepath.Separator)
-	if !strings.HasPrefix(filepath.Clean(fullPath)+string(filepath.Separator), cleanWork) && filepath.Clean(fullPath) != filepath.Clean(s.workDir) {
-		return "", fmt.Errorf("path escapes sandbox: %s", path)
-	}
-	return fullPath, nil
+	return sandboxSafePath(s.workDir, path)
 }
 
 func (s *dockerSession) WriteFile(ctx context.Context, path string, content []byte) error {

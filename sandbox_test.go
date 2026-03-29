@@ -679,28 +679,19 @@ func TestResourceLimits_Defaults(t *testing.T) {
 	var zero ResourceLimits
 	d := zero.withDefaults()
 
-	if d.CPUSeconds != 30 {
-		t.Errorf("expected 30, got %d", d.CPUSeconds)
-	}
 	if d.MemoryMB != 256 {
 		t.Errorf("expected 256, got %d", d.MemoryMB)
 	}
 	if d.WallClockSec != 60 {
 		t.Errorf("expected 60, got %d", d.WallClockSec)
 	}
-	if d.DiskMB != 100 {
-		t.Errorf("expected 100, got %d", d.DiskMB)
-	}
 	if d.MaxOutputBytes != 1<<20 {
 		t.Errorf("expected 1MB, got %d", d.MaxOutputBytes)
 	}
 
 	// Non-zero values should be preserved.
-	custom := ResourceLimits{CPUSeconds: 10, MemoryMB: 512}
+	custom := ResourceLimits{MemoryMB: 512}
 	d = custom.withDefaults()
-	if d.CPUSeconds != 10 {
-		t.Errorf("expected 10, got %d", d.CPUSeconds)
-	}
 	if d.MemoryMB != 512 {
 		t.Errorf("expected 512, got %d", d.MemoryMB)
 	}

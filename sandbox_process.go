@@ -88,36 +88,36 @@ type processSession struct {
 func (s *processSession) ID() string { return s.id }
 
 func (s *processSession) Execute(ctx context.Context, code string) (*ExecResult, error) {
-	interpreter, args, err := s.interpreterCmd(code)
-	if err != nil {
-		return nil, err
+	// Go needs a temp file; other languages use -c/-e flags.
+	if s.language == LangGo {
+		path := filepath.Join(s.workDir, "main.go")
+		if err := os.WriteFile(path, []byte(code), 0600); err != nil {
+			return nil, fmt.Errorf("write code file: %w", err)
+		}
+		defer os.Remove(path) //nolint:errcheck // best-effort cleanup
+		return s.runCmd(ctx, "go", "run", path)
 	}
 
+	interpreter, flag := s.interpreterFlag()
+	return s.runCmd(ctx, interpreter, flag, code)
+}
+
+func (s *processSession) RunCommand(ctx context.Context, command string) (*ExecResult, error) {
+	return s.runCmd(ctx, "sh", "-c", command)
+}
+
+// runCmd executes a command with timeout and captures stdout/stderr.
+func (s *processSession) runCmd(ctx context.Context, name string, args ...string) (*ExecResult, error) {
 	timeout := time.Duration(s.limits.WallClockSec) * time.Second
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, interpreter, args...) // #nosec G204 -- sandbox intentionally executes user-provided code
+	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204 -- sandbox intentionally executes user-provided code
 	cmd.Dir = s.workDir
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-
-	// For languages that read from a file, write a temp file.
-	tmpFile, err := s.writeCodeFile(code)
-	if err != nil {
-		return nil, err
-	}
-	if tmpFile != "" {
-		// Replace the placeholder in args with the actual file path.
-		for i, a := range cmd.Args {
-			if a == "__CODE_FILE__" {
-				cmd.Args[i] = tmpFile
-			}
-		}
-		defer os.Remove(tmpFile) //nolint:errcheck // best-effort cleanup
-	}
 
 	start := time.Now()
 	runErr := cmd.Run()
@@ -143,51 +143,8 @@ func (s *processSession) Execute(ctx context.Context, code string) (*ExecResult,
 	return result, nil
 }
 
-func (s *processSession) RunCommand(ctx context.Context, command string) (*ExecResult, error) {
-	timeout := time.Duration(s.limits.WallClockSec) * time.Second
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "sh", "-c", command) // #nosec G204 -- sandbox intentionally executes user-provided commands
-	cmd.Dir = s.workDir
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	start := time.Now()
-	runErr := cmd.Run()
-	duration := time.Since(start)
-
-	result := &ExecResult{
-		Stdout:   truncateOutput(stdout.String(), s.limits.MaxOutputBytes),
-		Stderr:   truncateOutput(stderr.String(), s.limits.MaxOutputBytes),
-		Duration: duration,
-	}
-
-	if ctx.Err() == context.DeadlineExceeded {
-		result.TimedOut = true
-		result.ExitCode = 124
-	} else if runErr != nil {
-		if exitErr, ok := runErr.(*exec.ExitError); ok {
-			result.ExitCode = exitErr.ExitCode()
-		} else {
-			return nil, fmt.Errorf("command error: %w", runErr)
-		}
-	}
-
-	return result, nil
-}
-
-// safePath resolves a path within the sandbox working directory and ensures
-// it does not escape via traversal (e.g., "../../etc/passwd").
 func (s *processSession) safePath(path string) (string, error) {
-	full := filepath.Join(s.workDir, path)
-	cleanWork := filepath.Clean(s.workDir) + string(filepath.Separator)
-	if !strings.HasPrefix(filepath.Clean(full)+string(filepath.Separator), cleanWork) && filepath.Clean(full) != filepath.Clean(s.workDir) {
-		return "", fmt.Errorf("path escapes sandbox: %s", path)
-	}
-	return full, nil
+	return sandboxSafePath(s.workDir, path)
 }
 
 func (s *processSession) WriteFile(_ context.Context, path string, content []byte) error {
@@ -239,33 +196,16 @@ func (s *processSession) Destroy(_ context.Context) error {
 	return os.RemoveAll(s.workDir)
 }
 
-// interpreterCmd returns the interpreter binary and arguments for executing code.
-func (s *processSession) interpreterCmd(code string) (string, []string, error) {
+// interpreterFlag returns the interpreter binary and its code-passing flag.
+func (s *processSession) interpreterFlag() (string, string) {
 	switch s.language {
 	case LangPython:
-		return "python3", []string{"-c", code}, nil
+		return "python3", "-c"
 	case LangJavaScript:
-		return "node", []string{"-e", code}, nil
-	case LangBash:
-		return "bash", []string{"-c", code}, nil
-	case LangGo:
-		// Go needs a file — use placeholder that gets replaced.
-		return "go", []string{"run", "__CODE_FILE__"}, nil
-	default:
-		return "", nil, fmt.Errorf("unsupported language: %s", s.language)
+		return "node", "-e"
+	default: // LangBash and others
+		return "bash", "-c"
 	}
-}
-
-// writeCodeFile writes code to a temp file for languages that need it (Go).
-func (s *processSession) writeCodeFile(code string) (string, error) {
-	if s.language != LangGo {
-		return "", nil
-	}
-	path := filepath.Join(s.workDir, "main.go")
-	if err := os.WriteFile(path, []byte(code), 0600); err != nil {
-		return "", fmt.Errorf("write code file: %w", err)
-	}
-	return path, nil
 }
 
 // truncateOutput truncates output to maxBytes, appending a truncation notice.

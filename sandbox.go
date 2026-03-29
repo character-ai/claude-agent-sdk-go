@@ -176,13 +176,7 @@ func (r *SandboxRegistry) isLanguageAllowed(lang Language) bool {
 // Caller must NOT hold r.mu.
 func (r *SandboxRegistry) getOrCreateSession(ctx context.Context, sessionID string, lang Language) (SandboxSession, error) {
 	if sessionID != "" && r.config.EnableSessions {
-		r.mu.RLock()
-		sess, ok := r.sessions[sessionID]
-		r.mu.RUnlock()
-		if ok {
-			return sess, nil
-		}
-		return nil, fmt.Errorf("session not found: %s", sessionID)
+		return r.getSession(sessionID)
 	}
 
 	sess, err := r.config.Backend.CreateSession(ctx, SessionOptions{
@@ -217,6 +211,17 @@ func (r *SandboxRegistry) recordExecution(sessionID string, lang Language, code,
 		Result:    result,
 		CreatedAt: time.Now(),
 	})
+}
+
+// getSession looks up an active session by ID. Returns an error if not found.
+func (r *SandboxRegistry) getSession(sessionID string) (SandboxSession, error) {
+	r.mu.RLock()
+	sess, ok := r.sessions[sessionID]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+	return sess, nil
 }
 
 // Tool handlers
@@ -289,11 +294,9 @@ type writeFileInput struct {
 }
 
 func (r *SandboxRegistry) handleWriteFile(ctx context.Context, input writeFileInput) (string, error) {
-	r.mu.RLock()
-	sess, ok := r.sessions[input.SessionID]
-	r.mu.RUnlock()
-	if !ok {
-		return "", fmt.Errorf("session not found: %s", input.SessionID)
+	sess, err := r.getSession(input.SessionID)
+	if err != nil {
+		return "", err
 	}
 
 	if err := sess.WriteFile(ctx, input.Path, []byte(input.Content)); err != nil {
@@ -308,11 +311,9 @@ type readFileInput struct {
 }
 
 func (r *SandboxRegistry) handleReadFile(ctx context.Context, input readFileInput) (string, error) {
-	r.mu.RLock()
-	sess, ok := r.sessions[input.SessionID]
-	r.mu.RUnlock()
-	if !ok {
-		return "", fmt.Errorf("session not found: %s", input.SessionID)
+	sess, err := r.getSession(input.SessionID)
+	if err != nil {
+		return "", err
 	}
 
 	data, err := sess.ReadFile(ctx, input.Path)
@@ -328,11 +329,9 @@ type listFilesInput struct {
 }
 
 func (r *SandboxRegistry) handleListFiles(ctx context.Context, input listFilesInput) (string, error) {
-	r.mu.RLock()
-	sess, ok := r.sessions[input.SessionID]
-	r.mu.RUnlock()
-	if !ok {
-		return "", fmt.Errorf("session not found: %s", input.SessionID)
+	sess, err := r.getSession(input.SessionID)
+	if err != nil {
+		return "", err
 	}
 
 	dir := input.Dir
@@ -446,8 +445,8 @@ func (r *SandboxRegistry) SystemPrompt() string {
 		b.WriteString("- Use sandbox_write_file/sandbox_read_file/sandbox_list_files to manage files within a session.\n")
 	}
 
-	fmt.Fprintf(&b, "- Resource limits: %ds CPU, %dMB memory, %ds wall-clock timeout.\n",
-		r.config.Limits.CPUSeconds, r.config.Limits.MemoryMB, r.config.Limits.WallClockSec)
+	fmt.Fprintf(&b, "- Resource limits: %dMB memory, %ds wall-clock timeout.\n",
+		r.config.Limits.MemoryMB, r.config.Limits.WallClockSec)
 	b.WriteString("- If execution times out or runs out of memory, you'll see that in the result. Optimize and retry.\n")
 
 	return b.String()

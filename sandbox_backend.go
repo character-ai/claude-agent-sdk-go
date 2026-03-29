@@ -2,6 +2,9 @@ package claudeagent
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -22,14 +25,12 @@ func AllLanguages() []Language {
 
 // ResourceLimits defines execution constraints for sandbox sessions.
 type ResourceLimits struct {
-	// CPUSeconds is the maximum CPU time in seconds. 0 uses the default (30s).
-	CPUSeconds int `json:"cpu_seconds,omitempty"`
 	// MemoryMB is the maximum memory in megabytes. 0 uses the default (256MB).
+	// Enforced by Docker backend via --memory flag.
 	MemoryMB int `json:"memory_mb,omitempty"`
 	// WallClockSec is the maximum wall-clock time in seconds. 0 uses the default (60s).
+	// Enforced by both backends via context timeout.
 	WallClockSec int `json:"wall_clock_sec,omitempty"`
-	// DiskMB is the maximum disk space in megabytes. 0 uses the default (100MB).
-	DiskMB int `json:"disk_mb,omitempty"`
 	// MaxOutputBytes truncates stdout/stderr to this many bytes. 0 uses the default (1MB).
 	MaxOutputBytes int `json:"max_output_bytes,omitempty"`
 }
@@ -37,10 +38,8 @@ type ResourceLimits struct {
 // DefaultResourceLimits returns safe default resource limits.
 func DefaultResourceLimits() ResourceLimits {
 	return ResourceLimits{
-		CPUSeconds:     30,
 		MemoryMB:       256,
 		WallClockSec:   60,
-		DiskMB:         100,
 		MaxOutputBytes: 1 << 20, // 1MB
 	}
 }
@@ -48,17 +47,11 @@ func DefaultResourceLimits() ResourceLimits {
 // withDefaults returns a copy with zero values replaced by defaults.
 func (r ResourceLimits) withDefaults() ResourceLimits {
 	d := DefaultResourceLimits()
-	if r.CPUSeconds == 0 {
-		r.CPUSeconds = d.CPUSeconds
-	}
 	if r.MemoryMB == 0 {
 		r.MemoryMB = d.MemoryMB
 	}
 	if r.WallClockSec == 0 {
 		r.WallClockSec = d.WallClockSec
-	}
-	if r.DiskMB == 0 {
-		r.DiskMB = d.DiskMB
 	}
 	if r.MaxOutputBytes == 0 {
 		r.MaxOutputBytes = d.MaxOutputBytes
@@ -88,6 +81,18 @@ type SandboxFileInfo struct {
 	Path  string `json:"path"`
 	Size  int64  `json:"size"`
 	IsDir bool   `json:"is_dir"`
+}
+
+// sandboxSafePath resolves a path within baseDir and ensures it does not
+// escape via traversal (e.g., "../../etc/passwd").
+func sandboxSafePath(baseDir, path string) (string, error) {
+	full := filepath.Join(baseDir, path)
+	cleanBase := filepath.Clean(baseDir) + string(filepath.Separator)
+	cleanFull := filepath.Clean(full)
+	if cleanFull != filepath.Clean(baseDir) && !strings.HasPrefix(cleanFull+string(filepath.Separator), cleanBase) {
+		return "", fmt.Errorf("path escapes sandbox: %s", path)
+	}
+	return full, nil
 }
 
 // SandboxBackend creates and manages isolated execution environments.
