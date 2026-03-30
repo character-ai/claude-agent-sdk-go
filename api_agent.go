@@ -484,6 +484,18 @@ func (a *APIAgent) streamTurn(
 		return nil, nil, apiTurnUsage{}, fmt.Errorf("stream error: %w", err)
 	}
 
+	// Check for truncated tool calls: if the stream ended with an open tool
+	// block (no ContentBlockStopEvent received), the output was truncated
+	// mid-tool-call — typically due to max_tokens.
+	if currentToolID != "" {
+		reason := usage.StopReason
+		if reason == "" {
+			reason = "unknown"
+		}
+		return nil, nil, usage, fmt.Errorf(
+			"output truncated: %s reached mid-tool-call (tool: %s)", reason, currentToolName)
+	}
+
 	events <- AgentEvent{Type: AgentEventMessageEnd}
 
 	return toolCalls, assistantBlocks, usage, nil
