@@ -59,19 +59,19 @@ func shouldRecoverMaxTokens(stopReason string, toolCalls []ToolCall, cfg *MaxTok
 // APIAgent runs agentic loops using the Anthropic API directly.
 // This is the pattern used by labs-service for custom tool flows.
 type APIAgent struct {
-	client         anthropic.Client
-	tools          *ToolRegistry
-	hooks          *Hooks
-	model          string
-	system         string
-	systemBlocks   []SystemPromptBlock
-	maxTurns       int
-	maxTokens      int
-	canUseTool     CanUseToolFunc
-	subagents      *SubagentConfig
-	skills         *SkillRegistry
-	contextBuilder *ContextBuilder
-	metrics        *MetricsCollector
+	client            anthropic.Client
+	tools             *ToolRegistry
+	hooks             *Hooks
+	model             string
+	system            string
+	systemBlocks      []SystemPromptBlock
+	maxTurns          int
+	maxTokens         int
+	canUseTool        CanUseToolFunc
+	subagents         *SubagentConfig
+	skills            *SkillRegistry
+	contextBuilder    *ContextBuilder
+	metrics           *MetricsCollector
 	parallelTools     bool
 	retry             *RetryConfig
 	budget            *BudgetConfig
