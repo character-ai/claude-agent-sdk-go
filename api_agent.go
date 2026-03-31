@@ -18,6 +18,7 @@ type APIAgent struct {
 	hooks          *Hooks
 	model          string
 	system         string
+	systemBlocks   []SystemPromptBlock
 	maxTurns       int
 	maxTokens      int
 	canUseTool     CanUseToolFunc
@@ -91,6 +92,11 @@ type APIAgentConfig struct {
 	// History controls conversation history compaction before each LLM call.
 	History *HistoryConfig
 
+	// SystemPromptBlocks provides structured system prompt blocks with cache
+	// control directives. When set, SystemPrompt is ignored.
+	// Each block can have CacheControl set to enable Anthropic prompt caching.
+	SystemPromptBlocks []SystemPromptBlock
+
 	// EnableTodos registers the write_todos tool, allowing the agent to
 	// plan its work and track progress via a todo list. The host app
 	// receives AgentEventTodosUpdated events when the list changes.
@@ -125,12 +131,22 @@ func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
 		tools = NewToolRegistry()
 	}
 
+	// Determine system prompt representation: structured blocks take precedence.
+	var systemStr string
+	var systemBlocks []SystemPromptBlock
+	if len(cfg.SystemPromptBlocks) > 0 {
+		systemBlocks = cfg.SystemPromptBlocks
+	} else if cfg.SystemPrompt != "" {
+		systemStr = cfg.SystemPrompt
+	}
+
 	a := &APIAgent{
 		client:         client,
 		tools:          tools,
 		hooks:          cfg.Hooks,
 		model:          cfg.Model,
-		system:         cfg.SystemPrompt,
+		system:         systemStr,
+		systemBlocks:   systemBlocks,
 		maxTurns:       cfg.MaxTurns,
 		maxTokens:      cfg.MaxTokens,
 		canUseTool:     cfg.CanUseTool,
@@ -380,7 +396,16 @@ func (a *APIAgent) streamTurn(
 		Messages:  messages,
 	}
 
-	if a.system != "" {
+	if len(a.systemBlocks) > 0 {
+		blocks := make([]anthropic.TextBlockParam, len(a.systemBlocks))
+		for i, b := range a.systemBlocks {
+			blocks[i] = anthropic.TextBlockParam{Text: b.Text}
+			if b.CacheControl != nil {
+				blocks[i].CacheControl = anthropic.CacheControlEphemeralParam{}
+			}
+		}
+		params.System = blocks
+	} else if a.system != "" {
 		params.System = []anthropic.TextBlockParam{
 			{Text: a.system},
 		}
@@ -515,6 +540,20 @@ func (a *APIAgent) executeTools(
 // TodoStore returns the agent's TodoStore, or nil if todos are not enabled.
 func (a *APIAgent) TodoStore() *TodoStore {
 	return a.todoStore
+}
+
+// SystemPromptBlock is a section of the system prompt with optional cache control.
+type SystemPromptBlock struct {
+	// Text is the content of this system prompt section.
+	Text string
+	// CacheControl, when non-nil, enables Anthropic prompt caching for this block.
+	// Set to &CacheControl{Type: "ephemeral"} for standard caching behavior.
+	CacheControl *CacheControl
+}
+
+// CacheControl configures prompt caching for a system prompt block.
+type CacheControl struct {
+	Type string // "ephemeral"
 }
 
 // RunSync executes the agent and returns all text output.
