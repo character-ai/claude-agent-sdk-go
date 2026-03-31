@@ -681,10 +681,7 @@ func (a *APIAgent) executeTools(
 	toolCalls []ToolCall,
 	events chan<- AgentEvent,
 ) []ToolResponse {
-	if a.parallelTools && len(toolCalls) > 1 {
-		return runToolsParallel(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.retry, a.metrics, events)
-	}
-	return runToolsSequential(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.retry, a.metrics, events)
+	return runToolsSmart(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.retry, a.metrics, events, a.parallelTools)
 }
 
 // TodoStore returns the agent's TodoStore, or nil if todos are not enabled.

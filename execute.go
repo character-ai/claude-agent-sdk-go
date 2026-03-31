@@ -143,8 +143,26 @@ func runToolsParallel(
 	return results
 }
 
-// runToolsSequential executes tool calls one at a time in order.
-func runToolsSequential(
+// isSafeForConcurrency checks whether a tool call can run concurrently.
+// A tool is safe if it has ConcurrencySafe=true in its annotations, or if
+// it has no annotations and defaultParallel is true.
+func isSafeForConcurrency(name string, tools *ToolRegistry, defaultParallel bool) bool {
+	if tools == nil {
+		return defaultParallel
+	}
+	ann := tools.ToolAnnotations(name)
+	if ann == nil {
+		return defaultParallel
+	}
+	return ann.ConcurrencySafe
+}
+
+// runToolsSmart partitions tool calls by concurrency safety and executes them accordingly.
+// Tools with ConcurrencySafe=true run in parallel with each other.
+// All other tools run sequentially.
+// When defaultParallel is true, unannotated tools are treated as concurrency-safe.
+// Results are returned in the original tool call order.
+func runToolsSmart(
 	ctx context.Context,
 	toolCalls []ToolCall,
 	tools *ToolRegistry,
@@ -153,10 +171,39 @@ func runToolsSequential(
 	retry *RetryConfig,
 	metrics *MetricsCollector,
 	events chan<- AgentEvent,
+	defaultParallel bool,
 ) []ToolResponse {
-	results := make([]ToolResponse, len(toolCalls))
-	for i, tc := range toolCalls {
-		results[i] = executeOneTool(ctx, tc, tools, hooks, canUseTool, retry, metrics, events)
+	// Fast path: single tool call needs no partitioning.
+	if len(toolCalls) <= 1 {
+		results := make([]ToolResponse, len(toolCalls))
+		for i, tc := range toolCalls {
+			results[i] = executeOneTool(ctx, tc, tools, hooks, canUseTool, retry, metrics, events)
+		}
+		return results
 	}
+
+	results := make([]ToolResponse, len(toolCalls))
+
+	// Walk tool calls and group consecutive safe tools for parallel execution.
+	i := 0
+	for i < len(toolCalls) {
+		if isSafeForConcurrency(toolCalls[i].Name, tools, defaultParallel) {
+			// Collect consecutive safe tools.
+			j := i
+			for j < len(toolCalls) && isSafeForConcurrency(toolCalls[j].Name, tools, defaultParallel) {
+				j++
+			}
+			// Run this batch in parallel.
+			batch := toolCalls[i:j]
+			batchResults := runToolsParallel(ctx, batch, tools, hooks, canUseTool, retry, metrics, events)
+			copy(results[i:j], batchResults)
+			i = j
+		} else {
+			// Unsafe tool: run sequentially.
+			results[i] = executeOneTool(ctx, toolCalls[i], tools, hooks, canUseTool, retry, metrics, events)
+			i++
+		}
+	}
+
 	return results
 }

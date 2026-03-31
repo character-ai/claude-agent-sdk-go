@@ -474,16 +474,14 @@ func (a *Agent) streamTurn(
 }
 
 // executeTools runs all tool calls and returns results.
-// When ParallelTools is enabled and there are multiple calls, they run concurrently.
+// Tools with ConcurrencySafe annotation run in parallel; others run sequentially.
+// When ParallelTools is true, unannotated tools are also treated as concurrency-safe.
 func (a *Agent) executeTools(
 	ctx context.Context,
 	toolCalls []ToolCall,
 	events chan<- AgentEvent,
 ) []ToolResponse {
-	if a.parallelTools && len(toolCalls) > 1 {
-		return runToolsParallel(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.retry, a.metrics, events)
-	}
-	return runToolsSequential(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.retry, a.metrics, events)
+	return runToolsSmart(ctx, toolCalls, a.tools, a.hooks, a.canUseTool, a.retry, a.metrics, events, a.parallelTools)
 }
 
 // historyToMessages converts conversation history to Message types for CLI communication.
