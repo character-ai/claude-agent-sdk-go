@@ -90,14 +90,18 @@ func executeOneTool(
 		if perTool := tools.ToolRetryConfig(tc.Name); perTool != nil {
 			rc = perTool
 		}
+		var meta *ToolResultMetadata
 		result, err := executeWithRetry(ctx, rc, func() (string, error) {
-			return tools.Execute(ctx, tc.Name, currentInput)
+			r, m, e := tools.ExecuteStructured(ctx, tc.Name, currentInput)
+			meta = m
+			return r, e
 		})
 		if err != nil {
 			response.Content = err.Error()
 			response.IsError = true
 		} else {
 			response.Content = result
+			response.Metadata = meta
 		}
 	}
 

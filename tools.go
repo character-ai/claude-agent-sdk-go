@@ -61,12 +61,28 @@ type ToolCall struct {
 	Input json.RawMessage `json:"input"`
 }
 
+// ToolResultMetadata carries optional side-channel information from tool
+// execution back to the agent loop.
+type ToolResultMetadata struct {
+	// InjectMessages are additional conversation messages to append to history
+	// after this tool result. Useful for tools that need to provide extra context.
+	InjectMessages []ConversationMessage
+	// SystemContext is additional context to include in the next system reminder.
+	SystemContext string
+	// SuggestFollowUp is a hint for the agent about what to do next.
+	SuggestFollowUp string
+}
+
 // ToolResponse is the result of executing a tool.
 type ToolResponse struct {
-	ToolUseID string `json:"tool_use_id"`
-	Content   string `json:"content"`
-	IsError   bool   `json:"is_error,omitempty"`
+	ToolUseID string              `json:"tool_use_id"`
+	Content   string              `json:"content"`
+	IsError   bool                `json:"is_error,omitempty"`
+	Metadata  *ToolResultMetadata `json:"-"` // not serialized
 }
+
+// StructuredToolHandler returns content + optional metadata alongside the result.
+type StructuredToolHandler func(ctx context.Context, input json.RawMessage) (string, *ToolResultMetadata, error)
 
 // ToolHandler is a function that executes a tool and returns a result.
 type ToolHandler func(ctx context.Context, input json.RawMessage) (string, error)
@@ -120,6 +136,32 @@ func RegisterFunc[T any](r *ToolRegistry, def ToolDefinition, handler func(ctx c
 	})
 }
 
+// RegisterStructured registers a tool with a handler that returns metadata.
+func (r *ToolRegistry) RegisterStructured(def ToolDefinition, handler StructuredToolHandler) {
+	// Wrap the structured handler into a regular ToolHandler for backwards compatibility.
+	wrapped := func(ctx context.Context, input json.RawMessage) (string, error) {
+		result, _, err := handler(ctx, input)
+		return result, err
+	}
+	_ = r.store.InsertTool(&StoredTool{
+		ToolDefinition:    def,
+		Source:            "native",
+		Handler:           wrapped,
+		StructuredHandler: handler,
+	})
+}
+
+// RegisterStructuredFunc is a convenience method for registering a structured tool with a typed handler.
+func RegisterStructuredFunc[T any](r *ToolRegistry, def ToolDefinition, handler func(ctx context.Context, input T) (string, *ToolResultMetadata, error)) {
+	r.RegisterStructured(def, func(ctx context.Context, raw json.RawMessage) (string, *ToolResultMetadata, error) {
+		var input T
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return "", nil, err
+		}
+		return handler(ctx, input)
+	})
+}
+
 // Definitions returns all registered tool definitions.
 func (r *ToolRegistry) Definitions() []ToolDefinition {
 	tools, err := r.store.ListTools()
@@ -135,14 +177,25 @@ func (r *ToolRegistry) Definitions() []ToolDefinition {
 
 // Execute runs a tool by name with the given input.
 func (r *ToolRegistry) Execute(ctx context.Context, name string, input json.RawMessage) (string, error) {
+	result, _, err := r.ExecuteStructured(ctx, name, input)
+	return result, err
+}
+
+// ExecuteStructured runs a tool and returns both the result string and any metadata.
+// If the tool uses a regular (non-structured) handler, metadata is nil.
+func (r *ToolRegistry) ExecuteStructured(ctx context.Context, name string, input json.RawMessage) (string, *ToolResultMetadata, error) {
 	tool, err := r.store.GetTool(name)
 	if err != nil || tool == nil {
-		return "", &ToolNotFoundError{Name: name}
+		return "", nil, &ToolNotFoundError{Name: name}
+	}
+	if tool.StructuredHandler != nil {
+		return tool.StructuredHandler(ctx, input)
 	}
 	if tool.Handler == nil {
-		return "", &ToolNotFoundError{Name: name}
+		return "", nil, &ToolNotFoundError{Name: name}
 	}
-	return tool.Handler(ctx, input)
+	result, err := tool.Handler(ctx, input)
+	return result, nil, err
 }
 
 // Has checks if a tool is registered.

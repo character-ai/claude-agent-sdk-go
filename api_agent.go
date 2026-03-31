@@ -415,6 +415,7 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 		// Use the concatenation of tool result content as the next query context.
 		var resultContext string
 		var resultBlocks []anthropic.ContentBlockParamUnion
+		var injectedMessages []ConversationMessage
 		for _, tr := range toolResults {
 			resultBlocks = append(resultBlocks, anthropic.NewToolResultBlock(
 				tr.ToolUseID,
@@ -424,12 +425,25 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 			if !tr.IsError && tr.Content != "" {
 				resultContext += tr.Content + " "
 			}
+			if tr.Metadata != nil {
+				injectedMessages = append(injectedMessages, tr.Metadata.InjectMessages...)
+			}
 		}
 		if resultContext != "" {
 			lastQuery = resultContext
 		}
 
 		messages = append(messages, anthropic.NewUserMessage(resultBlocks...))
+
+		// Inject any metadata messages from structured tool handlers
+		for _, msg := range injectedMessages {
+			switch msg.Role {
+			case "user":
+				messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
+			case "assistant":
+				messages = append(messages, anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content)))
+			}
+		}
 
 		// Record turn metrics and emit with AgentEventTurnComplete
 		var tm *TurnMetrics

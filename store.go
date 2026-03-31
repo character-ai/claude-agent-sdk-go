@@ -18,10 +18,11 @@ func nextHookID() string {
 
 // StoredTool wraps a ToolDefinition with storage metadata.
 type StoredTool struct {
-	ToolDefinition        // embedded
-	Source         string // "native", "mcp:<server>", "skill:<name>"
-	Tags           []string
-	Handler        ToolHandler // not indexed
+	ToolDefinition           // embedded
+	Source            string // "native", "mcp:<server>", "skill:<name>"
+	Tags              []string
+	Handler           ToolHandler           // not indexed
+	StructuredHandler StructuredToolHandler // if set, Handler wraps this
 }
 
 // StoredHook wraps hook data with an ID for indexing.
