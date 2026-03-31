@@ -56,13 +56,73 @@ func shouldRecoverMaxTokens(stopReason string, toolCalls []ToolCall, cfg *MaxTok
 	return stopReason == "max_tokens" && len(toolCalls) == 0 && attempt < defaults.MaxRetries
 }
 
+// FallbackModelConfig configures automatic model switching on persistent API errors.
+type FallbackModelConfig struct {
+	// Model is the fallback model identifier (e.g., "claude-haiku-4-5-20251001").
+	Model string
+	// AfterErrors is the number of consecutive errors before switching to fallback.
+	// Default: 3.
+	AfterErrors int
+	// RevertAfter is the duration after which to try the primary model again.
+	// Zero means stay on fallback for the rest of the session.
+	RevertAfter time.Duration
+}
+
+// modelSelector manages primary/fallback model switching.
+type modelSelector struct {
+	primary        string
+	fallback       *FallbackModelConfig
+	consecutiveErr int
+	switchedAt     time.Time
+	usingFallback  bool
+}
+
+func newModelSelector(primary string, fallback *FallbackModelConfig) *modelSelector {
+	return &modelSelector{primary: primary, fallback: fallback}
+}
+
+func (ms *modelSelector) currentModel() string {
+	if ms.fallback == nil || !ms.usingFallback {
+		return ms.primary
+	}
+	// Check if we should revert to primary.
+	if ms.fallback.RevertAfter > 0 && time.Since(ms.switchedAt) >= ms.fallback.RevertAfter {
+		ms.usingFallback = false
+		ms.consecutiveErr = 0
+		return ms.primary
+	}
+	return ms.fallback.Model
+}
+
+func (ms *modelSelector) recordError() {
+	if ms.fallback == nil {
+		return
+	}
+	ms.consecutiveErr++
+	threshold := ms.fallback.AfterErrors
+	if threshold == 0 {
+		threshold = 3
+	}
+	if ms.consecutiveErr >= threshold && !ms.usingFallback {
+		ms.usingFallback = true
+		ms.switchedAt = time.Now()
+	}
+}
+
+func (ms *modelSelector) recordSuccess() {
+	ms.consecutiveErr = 0
+	if ms.usingFallback {
+		ms.usingFallback = false
+	}
+}
+
 // APIAgent runs agentic loops using the Anthropic API directly.
 // This is the pattern used by labs-service for custom tool flows.
 type APIAgent struct {
 	client            anthropic.Client
 	tools             *ToolRegistry
 	hooks             *Hooks
-	model             string
+	modelSel          *modelSelector
 	system            string
 	systemBlocks      []SystemPromptBlock
 	maxTurns          int
@@ -156,6 +216,10 @@ type APIAgentConfig struct {
 	// MaxTokensRecovery, if non-nil, enables automatic retry with increased
 	// max_tokens when output is truncated.
 	MaxTokensRecovery *MaxTokensRecovery
+
+	// FallbackModel configures automatic model switching on persistent API errors.
+	// When set, the agent switches to the fallback model after consecutive errors.
+	FallbackModel *FallbackModelConfig
 }
 
 // NewAPIAgent creates an agent that uses the Anthropic API.
@@ -195,7 +259,7 @@ func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
 		client:            client,
 		tools:             tools,
 		hooks:             cfg.Hooks,
-		model:             cfg.Model,
+		modelSel:          newModelSelector(cfg.Model, cfg.FallbackModel),
 		system:            systemStr,
 		systemBlocks:      systemBlocks,
 		maxTurns:          cfg.MaxTurns,
@@ -299,9 +363,11 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 			toolCalls, assistantBlocks, usage, err = a.streamTurn(ctx, llmMessages, tools, events, turnMaxTokens)
 			llmLatency = time.Since(llmStart)
 			if err != nil {
+				a.modelSel.recordError()
 				events <- AgentEvent{Type: AgentEventError, Error: err}
 				return
 			}
+			a.modelSel.recordSuccess()
 
 			if shouldRecoverMaxTokens(usage.StopReason, toolCalls, a.maxTokensRecovery, attempt) {
 				defaults := a.maxTokensRecovery.withDefaults()
@@ -461,7 +527,7 @@ func (a *APIAgent) streamTurn(
 ) ([]ToolCall, []anthropic.ContentBlockParamUnion, apiTurnUsage, error) {
 
 	params := anthropic.MessageNewParams{
-		Model:     anthropic.Model(a.model),
+		Model:     anthropic.Model(a.modelSel.currentModel()),
 		MaxTokens: int64(maxTokens),
 		Messages:  messages,
 	}
