@@ -4,11 +4,57 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
+
+// MaxTokensRecovery configures automatic retry when output is truncated
+// due to max_tokens limits. Only applies when stop_reason is "max_tokens"
+// and there are no tool calls or mid-tool-call errors.
+type MaxTokensRecovery struct {
+	// ScaleFactor multiplies max_tokens on each retry. Default: 2.0.
+	ScaleFactor float64
+	// MaxRetries is the maximum number of recovery attempts. Default: 2.
+	MaxRetries int
+	// Ceiling is the absolute maximum for max_tokens. Default: 16384.
+	Ceiling int
+}
+
+// withDefaults returns a copy with zero fields replaced by defaults.
+func (r *MaxTokensRecovery) withDefaults() MaxTokensRecovery {
+	out := *r
+	if out.ScaleFactor == 0 {
+		out.ScaleFactor = 2.0
+	}
+	if out.MaxRetries == 0 {
+		out.MaxRetries = 2
+	}
+	if out.Ceiling == 0 {
+		out.Ceiling = 16384
+	}
+	return out
+}
+
+// nextMaxTokens computes the next max_tokens value, capped at Ceiling.
+func (r *MaxTokensRecovery) nextMaxTokens(current int) int {
+	next := int(math.Ceil(float64(current) * r.ScaleFactor))
+	if next > r.Ceiling {
+		next = r.Ceiling
+	}
+	return next
+}
+
+// shouldRecoverMaxTokens reports whether a max_tokens recovery retry should be attempted.
+func shouldRecoverMaxTokens(stopReason string, toolCalls []ToolCall, cfg *MaxTokensRecovery, attempt int) bool {
+	if cfg == nil {
+		return false
+	}
+	defaults := cfg.withDefaults()
+	return stopReason == "max_tokens" && len(toolCalls) == 0 && attempt < defaults.MaxRetries
+}
 
 // APIAgent runs agentic loops using the Anthropic API directly.
 // This is the pattern used by labs-service for custom tool flows.
@@ -26,11 +72,12 @@ type APIAgent struct {
 	skills         *SkillRegistry
 	contextBuilder *ContextBuilder
 	metrics        *MetricsCollector
-	parallelTools  bool
-	retry          *RetryConfig
-	budget         *BudgetConfig
-	history        *HistoryConfig
-	todoStore      *TodoStore
+	parallelTools     bool
+	retry             *RetryConfig
+	budget            *BudgetConfig
+	history           *HistoryConfig
+	todoStore         *TodoStore
+	maxTokensRecovery *MaxTokensRecovery
 }
 
 // APIAgentConfig configures an API-based agent.
@@ -105,6 +152,10 @@ type APIAgentConfig struct {
 	// TodoStore is an optional pre-existing TodoStore to use. If nil and
 	// EnableTodos is true, a new store is created automatically.
 	TodoStore *TodoStore
+
+	// MaxTokensRecovery, if non-nil, enables automatic retry with increased
+	// max_tokens when output is truncated.
+	MaxTokensRecovery *MaxTokensRecovery
 }
 
 // NewAPIAgent creates an agent that uses the Anthropic API.
@@ -141,23 +192,24 @@ func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
 	}
 
 	a := &APIAgent{
-		client:         client,
-		tools:          tools,
-		hooks:          cfg.Hooks,
-		model:          cfg.Model,
-		system:         systemStr,
-		systemBlocks:   systemBlocks,
-		maxTurns:       cfg.MaxTurns,
-		maxTokens:      cfg.MaxTokens,
-		canUseTool:     cfg.CanUseTool,
-		subagents:      cfg.Subagents,
-		skills:         cfg.Skills,
-		contextBuilder: cfg.ContextBuilder,
-		metrics:        cfg.Metrics,
-		parallelTools:  cfg.ParallelTools,
-		retry:          cfg.Retry,
-		budget:         cfg.Budget,
-		history:        cfg.History,
+		client:            client,
+		tools:             tools,
+		hooks:             cfg.Hooks,
+		model:             cfg.Model,
+		system:            systemStr,
+		systemBlocks:      systemBlocks,
+		maxTurns:          cfg.MaxTurns,
+		maxTokens:         cfg.MaxTokens,
+		canUseTool:        cfg.CanUseTool,
+		subagents:         cfg.Subagents,
+		skills:            cfg.Skills,
+		contextBuilder:    cfg.ContextBuilder,
+		metrics:           cfg.Metrics,
+		parallelTools:     cfg.ParallelTools,
+		retry:             cfg.Retry,
+		budget:            cfg.Budget,
+		history:           cfg.History,
+		maxTokensRecovery: cfg.MaxTokensRecovery,
 	}
 
 	// Register Task tool if subagents are configured
@@ -233,13 +285,30 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 		// Apply history compaction before sending to the LLM
 		llmMessages := compactMessages(messages, a.history)
 
-		// Make streaming API call, tracking LLM latency
-		llmStart := time.Now()
-		toolCalls, assistantBlocks, usage, err := a.streamTurn(ctx, llmMessages, tools, events)
-		llmLatency := time.Since(llmStart)
-		if err != nil {
-			events <- AgentEvent{Type: AgentEventError, Error: err}
-			return
+		// Make streaming API call, tracking LLM latency.
+		// Wrap in a retry loop for max_tokens recovery.
+		turnMaxTokens := a.maxTokens
+		var toolCalls []ToolCall
+		var assistantBlocks []anthropic.ContentBlockParamUnion
+		var usage apiTurnUsage
+		var llmLatency time.Duration
+
+		for attempt := 0; ; attempt++ {
+			llmStart := time.Now()
+			var err error
+			toolCalls, assistantBlocks, usage, err = a.streamTurn(ctx, llmMessages, tools, events, turnMaxTokens)
+			llmLatency = time.Since(llmStart)
+			if err != nil {
+				events <- AgentEvent{Type: AgentEventError, Error: err}
+				return
+			}
+
+			if shouldRecoverMaxTokens(usage.StopReason, toolCalls, a.maxTokensRecovery, attempt) {
+				defaults := a.maxTokensRecovery.withDefaults()
+				turnMaxTokens = defaults.nextMaxTokens(turnMaxTokens)
+				continue
+			}
+			break
 		}
 
 		// Accumulate token usage
@@ -388,11 +457,12 @@ func (a *APIAgent) streamTurn(
 	messages []anthropic.MessageParam,
 	tools []anthropic.ToolUnionParam,
 	events chan<- AgentEvent,
+	maxTokens int,
 ) ([]ToolCall, []anthropic.ContentBlockParamUnion, apiTurnUsage, error) {
 
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(a.model),
-		MaxTokens: int64(a.maxTokens),
+		MaxTokens: int64(maxTokens),
 		Messages:  messages,
 	}
 
