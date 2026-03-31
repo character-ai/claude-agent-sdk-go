@@ -207,15 +207,214 @@ New type: `HistoryConfig`.
 New helpers: `compactHistory([]ConversationMessage, *HistoryConfig)`,
 `compactMessages([]anthropic.MessageParam, *HistoryConfig)`.
 
+#### Tool Annotations (`ToolAnnotations`)
+
+Safety and behavior metadata for tools, enabling smarter harness decisions without changing tool execution.
+
+- **`ReadOnly`** — tool does not modify state
+- **`Destructive`** — tool makes hard-to-reverse changes
+- **`ConcurrencySafe`** — tool can run in parallel with other safe tools
+- **`SearchHint`** — keyword phrase for deferred tool discovery
+
+```go
+tools.Register(claude.ToolDefinition{
+    Name: "web_search",
+    Annotations: &claude.ToolAnnotations{
+        ReadOnly:        true,
+        ConcurrencySafe: true,
+        SearchHint:      "search the web for information",
+    },
+    // ...
+}, handler)
+```
+
+New type: `ToolAnnotations`. New field on `ToolDefinition`: `Annotations *ToolAnnotations`.
+New methods on `ToolRegistry`: `IsConcurrencySafe(name)`, `ToolAnnotations(name)`.
+
+#### Per-Tool Concurrency (`runToolsSmart`)
+
+Replaces the global `ParallelTools` bool with per-tool concurrency decisions based on `ToolAnnotations.ConcurrencySafe`.
+
+- Tools annotated `ConcurrencySafe: true` run in parallel with each other
+- Unannotated tools fall back to the global `ParallelTools` setting
+- Unsafe tools act as barriers — sequential execution with exclusive access
+- Results always returned in original call order
+
+The global `ParallelTools` field remains as the default for unannotated tools.
+
+#### Three-Stage Tool Validation
+
+Two new optional callbacks on `ToolDefinition` that run before the handler:
+
+- **`CheckPermissions`** — tool-specific permission check (after pre-hooks, before validation)
+- **`ValidateInput`** — input validation (after permission check, before execution)
+
+Both are `json:"-"` and nil by default. The execution pipeline is now: CanUseTool → PreHooks → CheckPermissions → ValidateInput → Execute → PostHooks.
+
+```go
+claude.RegisterFunc(tools, claude.ToolDefinition{
+    Name: "delete_file",
+    CheckPermissions: func(ctx context.Context, input json.RawMessage) error {
+        // check user has delete access
+    },
+    ValidateInput: func(ctx context.Context, input json.RawMessage) error {
+        // validate path is safe
+    },
+}, handler)
+```
+
+New types: `ToolValidator`, `ToolPermissionCheck`.
+New method on `ToolRegistry`: `GetToolDef(name)`.
+
+#### Structured Tool Results (`ToolResultMetadata`)
+
+Tool handlers can now return metadata alongside string content, enabling tools to inject messages, provide system context, or suggest follow-up actions.
+
+```go
+tools.RegisterStructured(def, func(ctx context.Context, input json.RawMessage) (string, *claude.ToolResultMetadata, error) {
+    return "result", &claude.ToolResultMetadata{
+        InjectMessages: []claude.ConversationMessage{{Role: "user", Content: "extra context"}},
+        SystemContext:  "user is authenticated",
+    }, nil
+})
+```
+
+- `InjectMessages` are appended to history after tool results
+- `Metadata` field on `ToolResponse` carries metadata (not serialized to JSON)
+- `RegisterStructuredFunc[T]` provides type-safe generic registration
+- `ExecuteStructured` returns both content and metadata
+
+New types: `ToolResultMetadata`, `StructuredToolHandler`.
+New methods: `RegisterStructured`, `RegisterStructuredFunc`, `ExecuteStructured`.
+
+#### System Prompt Cache Boundary (`SystemPromptBlock`)
+
+Support for Anthropic's prompt caching via structured system prompt blocks on `APIAgent`.
+
+```go
+agent := claude.NewAPIAgent(claude.APIAgentConfig{
+    SystemPromptBlocks: []claude.SystemPromptBlock{
+        {Text: staticInstructions, CacheControl: &claude.CacheControl{Type: "ephemeral"}},
+        {Text: dynamicContext}, // not cached
+    },
+})
+```
+
+When `SystemPromptBlocks` is set, `SystemPrompt` is ignored. Each block can have `CacheControl` set independently, enabling cache boundaries between static and dynamic content.
+
+New types: `SystemPromptBlock`, `CacheControl`.
+
+#### Max-Tokens Recovery (`MaxTokensRecovery`)
+
+Automatic retry with increased `max_tokens` when the API truncates output (stop reason `max_tokens` with no tool calls).
+
+```go
+agent := claude.NewAPIAgent(claude.APIAgentConfig{
+    MaxTokens: 4096,
+    MaxTokensRecovery: &claude.MaxTokensRecovery{
+        ScaleFactor: 2.0,  // double max_tokens each retry
+        MaxRetries:  2,    // up to 2 retries
+        Ceiling:     16384,
+    },
+})
+```
+
+Distinct from the mid-tool-call truncation error (which returns `AgentEventError`). This recovery is for legitimate end-of-turn truncation. APIAgent only.
+
+New type: `MaxTokensRecovery`.
+
+#### Fallback Model (`FallbackModelConfig`)
+
+Automatic model switching on persistent API errors for `APIAgent`.
+
+```go
+agent := claude.NewAPIAgent(claude.APIAgentConfig{
+    Model: "claude-sonnet-4-20250514",
+    FallbackModel: &claude.FallbackModelConfig{
+        Model:       "claude-haiku-4-5-20251001",
+        AfterErrors: 3,
+        RevertAfter: 5 * time.Minute,
+    },
+})
+```
+
+- Switches to fallback after `AfterErrors` consecutive errors (default: 3)
+- Reverts to primary on success or after `RevertAfter` duration
+- `RevertAfter: 0` means stay on fallback for the rest of the session
+
+New type: `FallbackModelConfig`.
+
+#### System Reminders (`SystemReminder`)
+
+Utility for injecting `<system-reminder>` tagged content into conversation history mid-conversation.
+
+```go
+reminders := []claude.SystemReminder{
+    {Content: "The user prefers concise answers"},
+}
+history = claude.InjectReminders(history, reminders)
+```
+
+Pure utility — no agent loop modifications required. Callers inject via hooks or direct history manipulation.
+
+New type: `SystemReminder`.
+New functions: `FormatReminder`, `FormatReminders`, `InjectReminders`.
+
+#### History Summarization (`HistorySummarizer`)
+
+Extends history compaction with an optional summarization stage. When turns exceed `MaxTurns`, dropped turns can be summarized instead of silently discarded.
+
+```go
+agent := claude.NewAgent(claude.AgentConfig{
+    History: &claude.HistoryConfig{
+        MaxTurns: 10,
+        Summarizer: func(ctx context.Context, msgs []claude.ConversationMessage) (string, error) {
+            // Call an LLM to summarize the dropped turns
+            return summary, nil
+        },
+    },
+})
+```
+
+- Summary prepended as `[Previous conversation summary]` user message
+- `SummarizeThreshold` controls how many excess turns trigger summarization
+- Summarizer errors fall back silently to the existing drop behavior
+
+New type: `HistorySummarizer`.
+
+#### Deferred Tool Loading (`DeferredToolRegistry`)
+
+ToolSearch pattern for large tool registries — tools are not loaded into the active context until the model explicitly requests them.
+
+```go
+deferred := claude.NewDeferredToolRegistry(func(ctx context.Context, name string) (*claude.ToolDefinition, claude.ToolHandler, error) {
+    // resolve tool definition from config, database, etc.
+})
+deferred.Add(claude.DeferredTool{Name: "rare_tool", Description: "...", SearchHint: "..."})
+
+claude.RegisterToolSearchTool(tools, deferred)
+```
+
+- Registers a `ToolSearch` tool that the model invokes to discover and load tools on demand
+- Simple keyword matching against name, description, and search hint
+- Loaded tools are registered into the active `ToolRegistry` automatically
+
+New types: `DeferredTool`, `DeferredToolLoader`, `DeferredToolRegistry`.
+New function: `RegisterToolSearchTool`.
+
 ### Changed
 
-- `AgentConfig` gains seven new optional fields: `Metrics`, `ParallelTools`, `Retry`, `Budget`, `History`, `EnableTodos`, `TodoStore`. Zero values preserve existing behavior.
-- `APIAgentConfig` gains the same seven fields (`Budget.MaxCostUSD` is a no-op for APIAgent).
-- `AgentEvent` gains two new optional fields: `TurnMetrics *TurnMetrics` (nil unless `MetricsCollector` is configured) and `Todos []TodoItem` (nil unless `EnableTodos` is set).
-- `AgentEventTurnComplete` now carries `TurnMetrics` when a collector is active.
-- `APIAgent.streamTurn` now returns an `apiTurnUsage` value (unexported) so
-  token counts are available to the budget tracker.
-- `ToolDefinition` gains `RetryConfig *RetryConfig` (not serialised to JSON).
+- `ToolDefinition` gains three new fields: `Annotations *ToolAnnotations`, `ValidateInput ToolValidator`, `CheckPermissions ToolPermissionCheck`. All nil by default.
+- `ToolResponse` gains `Metadata *ToolResultMetadata` (json:"-", nil unless tool returns structured results).
+- `AgentConfig` gains optional fields: `Metrics`, `ParallelTools`, `Retry`, `Budget`, `History`, `EnableTodos`, `TodoStore`. Zero values preserve existing behavior.
+- `APIAgentConfig` gains the same fields plus `SystemPromptBlocks`, `MaxTokensRecovery`, `FallbackModel`.
+- `APIAgent` replaces internal `model string` with `modelSelector` state machine for fallback support.
+- `AgentEvent` gains `TurnMetrics *TurnMetrics` and `Todos []TodoItem` optional fields.
+- `HistoryConfig` gains `Summarizer HistorySummarizer` and `SummarizeThreshold int`.
+- `compactHistory` and `compactMessages` now accept `context.Context` as first parameter.
+- Tool execution pipeline extended: CanUseTool → PreHooks → CheckPermissions → ValidateInput → Execute → PostHooks.
+- `executeTools` in both agents now uses `runToolsSmart` for per-tool concurrency decisions.
+- `runToolsSequential` removed (replaced by `runToolsSmart`).
 
 ---
 
