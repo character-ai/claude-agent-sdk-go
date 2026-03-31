@@ -5,6 +5,14 @@ import (
 	"encoding/json"
 )
 
+// ToolValidator validates tool input before execution.
+// Return nil to allow, or an error to reject.
+type ToolValidator func(ctx context.Context, input json.RawMessage) error
+
+// ToolPermissionCheck performs tool-specific permission checks.
+// Return nil to allow, or an error to deny.
+type ToolPermissionCheck func(ctx context.Context, input json.RawMessage) error
+
 // ToolAnnotations provides safety and behavior metadata for a tool.
 // These annotations inform the agent harness about tool properties without
 // changing the tool's execution. They enable per-tool concurrency decisions,
@@ -32,6 +40,14 @@ type ToolDefinition struct {
 	// Annotations provides optional safety and behavior metadata.
 	// If nil, the tool has no annotations and defaults apply.
 	Annotations *ToolAnnotations `json:"annotations,omitempty"`
+
+	// ValidateInput performs input validation before execution.
+	// Called after pre-hooks, before the handler. If nil, no validation is performed.
+	ValidateInput ToolValidator `json:"-"`
+
+	// CheckPermissions performs tool-specific permission checks.
+	// Called after pre-hooks, before ValidateInput. If nil, no check is performed.
+	CheckPermissions ToolPermissionCheck `json:"-"`
 
 	// RetryConfig overrides the agent-level retry policy for this specific tool.
 	// If nil, the agent's global RetryConfig is used.
@@ -151,6 +167,15 @@ func (r *ToolRegistry) ToolAnnotations(name string) *ToolAnnotations {
 		return nil
 	}
 	return tool.Annotations
+}
+
+// GetToolDef returns the full ToolDefinition for the named tool, or nil.
+func (r *ToolRegistry) GetToolDef(name string) *ToolDefinition {
+	tool, err := r.store.GetTool(name)
+	if err != nil || tool == nil {
+		return nil
+	}
+	return &tool.ToolDefinition
 }
 
 // ToolRetryConfig returns the per-tool RetryConfig for the given name, or nil

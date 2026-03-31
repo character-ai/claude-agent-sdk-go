@@ -56,6 +56,26 @@ func executeOneTool(
 		}
 	}
 
+	// Tool-specific permission check
+	if def := tools.GetToolDef(tc.Name); def != nil {
+		if def.CheckPermissions != nil {
+			if err := def.CheckPermissions(ctx, currentInput); err != nil {
+				response.Content = fmt.Sprintf("Permission denied: %s", err.Error())
+				response.IsError = true
+				events <- AgentEvent{Type: AgentEventToolResult, ToolResponse: &response}
+				return response
+			}
+		}
+		if def.ValidateInput != nil {
+			if err := def.ValidateInput(ctx, currentInput); err != nil {
+				response.Content = fmt.Sprintf("Validation error: %s", err.Error())
+				response.IsError = true
+				events <- AgentEvent{Type: AgentEventToolResult, ToolResponse: &response}
+				return response
+			}
+		}
+	}
+
 	// Execute
 	if metrics != nil {
 		metrics.recordToolStart(tc.ID)
