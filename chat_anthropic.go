@@ -38,9 +38,17 @@ func (p *AnthropicProvider) Name() string { return "anthropic" }
 
 // Complete sends the chat request to the Anthropic Messages API with streaming.
 // onEvent is called for each content delta and tool use event as they arrive.
+// defaultAnthropicModel is used when no model is specified in the ChatRequest.
+const defaultAnthropicModel = "claude-sonnet-4-20250514"
+
 func (p *AnthropicProvider) Complete(ctx context.Context, req ChatRequest, onEvent ChatStreamCallback) (ChatResponse, error) {
+	model := req.Model
+	if model == "" {
+		model = defaultAnthropicModel
+	}
+
 	params := anthropic.MessageNewParams{
-		Model:     anthropic.Model(req.Model),
+		Model:     anthropic.Model(model),
 		MaxTokens: int64(req.MaxTokens),
 		Messages:  convertMessagesToAnthropic(req.Messages),
 	}
