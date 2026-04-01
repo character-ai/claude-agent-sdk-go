@@ -3,8 +3,6 @@ package claudeagent
 import (
 	"context"
 	"fmt"
-
-	"github.com/anthropics/anthropic-sdk-go"
 )
 
 // HistorySummarizer summarizes a slice of conversation messages into a single
@@ -113,36 +111,5 @@ func compactHistory(ctx context.Context, history []ConversationMessage, cfg *His
 			}
 		}
 	}
-	return out
-}
-
-// compactMessages returns a compacted view of the API agent's message list.
-// Only MaxTurns is applied; DropToolResults is not supported for APIAgent
-// because modifying anthropic.MessageParam tool-result blocks while keeping
-// the tool-use IDs valid is non-trivial and best handled via MaxTurns alone.
-func compactMessages(_ context.Context, messages []anthropic.MessageParam, cfg *HistoryConfig) []anthropic.MessageParam {
-	if cfg == nil || cfg.MaxTurns == 0 {
-		return messages
-	}
-	if len(messages) <= 1 {
-		return messages
-	}
-
-	// Layout:
-	//   messages[0]           = initial user prompt (always kept)
-	//   messages[1], [2], ... = alternating AssistantMessage / UserMessage(tool results)
-	// Each turn = 1 assistant + 1 user pair = 2 messages.
-	rest := messages[1:]
-	maxRest := cfg.MaxTurns * 2
-	if len(rest) <= maxRest {
-		return messages
-	}
-
-	// Summarization for APIAgent can be added in a future iteration;
-	// for now only MaxTurns-based compaction is supported.
-
-	out := make([]anthropic.MessageParam, 0, 1+maxRest)
-	out = append(out, messages[0])
-	out = append(out, rest[len(rest)-maxRest:]...)
 	return out
 }

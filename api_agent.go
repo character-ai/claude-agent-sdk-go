@@ -2,13 +2,9 @@ package claudeagent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"time"
-
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
 // MaxTokensRecovery configures automatic retry when output is truncated
@@ -119,7 +115,7 @@ func (ms *modelSelector) recordSuccess() {
 // APIAgent runs agentic loops using the Anthropic API directly.
 // This is the pattern used by labs-service for custom tool flows.
 type APIAgent struct {
-	client            anthropic.Client
+	provider          LLMProvider
 	tools             *ToolRegistry
 	hooks             *Hooks
 	modelSel          *modelSelector
@@ -220,17 +216,15 @@ type APIAgentConfig struct {
 	// FallbackModel configures automatic model switching on persistent API errors.
 	// When set, the agent switches to the fallback model after consecutive errors.
 	FallbackModel *FallbackModelConfig
+
+	// Provider overrides the default AnthropicProvider.
+	// When set, APIKey is ignored (the provider manages its own credentials).
+	// When nil, an AnthropicProvider is created from APIKey.
+	Provider LLMProvider
 }
 
-// NewAPIAgent creates an agent that uses the Anthropic API.
+// NewAPIAgent creates an agent that uses the Anthropic API (or a custom provider).
 func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
-	opts := []option.RequestOption{}
-	if cfg.APIKey != "" {
-		opts = append(opts, option.WithAPIKey(cfg.APIKey))
-	}
-
-	client := anthropic.NewClient(opts...)
-
 	if cfg.Model == "" {
 		cfg.Model = "claude-sonnet-4-20250514"
 	}
@@ -255,8 +249,16 @@ func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
 		systemStr = cfg.SystemPrompt
 	}
 
+	// Use the provided provider, or default to Anthropic.
+	var provider LLMProvider
+	if cfg.Provider != nil {
+		provider = cfg.Provider
+	} else {
+		provider = NewAnthropicProvider(AnthropicProviderConfig{APIKey: cfg.APIKey})
+	}
+
 	a := &APIAgent{
-		client:            client,
+		provider:          provider,
 		tools:             tools,
 		hooks:             cfg.Hooks,
 		modelSel:          newModelSelector(cfg.Model, cfg.FallbackModel),
@@ -311,19 +313,15 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 		a.metrics.recordSessionStart()
 	}
 
-	// Build initial messages
-	messages := []anthropic.MessageParam{
-		anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
-	}
+	// Build initial chat history with canonical ChatMessage types.
+	history := []ChatMessage{{Role: ChatRoleUser, Content: prompt}}
 
-	// Convert tool definitions to Anthropic format.
-	// When context builder is configured, tools are rebuilt each turn based on latest context.
+	// Select tools for the first turn.
 	lastQuery := prompt
-	tools := a.buildToolsForQuery(ctx, lastQuery, events)
+	toolDefs := a.selectTools(ctx, lastQuery, events)
 
 	budget := newBudgetTracker(a.budget)
 
-	// Accumulate token usage across turns for final reporting.
 	var totalInputTokens, totalOutputTokens int
 	var totalCacheCreation, totalCacheRead int
 
@@ -335,7 +333,6 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 		default:
 		}
 
-		// Check time budget before each turn
 		if err := budget.check(); err != nil {
 			events <- AgentEvent{Type: AgentEventError, Error: err}
 			return
@@ -343,33 +340,58 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 
 		// Rebuild tools if context builder is configured (dynamic selection per turn).
 		if a.contextBuilder != nil && turn > 0 {
-			tools = a.buildToolsForQuery(ctx, lastQuery, events)
+			toolDefs = a.selectTools(ctx, lastQuery, events)
 		}
 
-		// Apply history compaction before sending to the LLM
-		llmMessages := compactMessages(ctx, messages, a.history)
+		// Compact history before sending to the LLM.
+		llmHistory := compactChatHistory(ctx, history, a.history)
 
-		// Make streaming API call, tracking LLM latency.
-		// Wrap in a retry loop for max_tokens recovery.
+		// Build the provider request.
+		req := ChatRequest{
+			Model:        a.modelSel.currentModel(),
+			Messages:     llmHistory,
+			Tools:        toolDefs,
+			SystemPrompt: a.system,
+			SystemBlocks: a.systemBlocks,
+			MaxTokens:    a.maxTokens,
+		}
+
+		// Translate streaming events to AgentEvents.
+		onEvent := func(se ChatStreamEvent) {
+			switch se.Type {
+			case ChatStreamContentDelta:
+				events <- AgentEvent{Type: AgentEventContentDelta, Content: se.Content}
+			case ChatStreamToolUseStart:
+				events <- AgentEvent{Type: AgentEventToolUseStart, ToolCall: se.ToolCall}
+			case ChatStreamToolUseDelta:
+				events <- AgentEvent{Type: AgentEventToolUseDelta, Content: se.Content}
+			case ChatStreamToolUseEnd:
+				events <- AgentEvent{Type: AgentEventToolUseEnd, ToolCall: se.ToolCall}
+			}
+		}
+
+		// Call provider with max_tokens recovery retry loop.
 		turnMaxTokens := a.maxTokens
-		var toolCalls []ToolCall
-		var assistantBlocks []anthropic.ContentBlockParamUnion
-		var usage apiTurnUsage
+		var resp ChatResponse
 		var llmLatency time.Duration
 
 		for attempt := 0; ; attempt++ {
+			req.MaxTokens = turnMaxTokens
+			events <- AgentEvent{Type: AgentEventMessageStart}
 			llmStart := time.Now()
 			var err error
-			toolCalls, assistantBlocks, usage, err = a.streamTurn(ctx, llmMessages, tools, events, turnMaxTokens)
+			resp, err = a.provider.Complete(ctx, req, onEvent)
 			llmLatency = time.Since(llmStart)
+
 			if err != nil {
 				a.modelSel.recordError()
 				events <- AgentEvent{Type: AgentEventError, Error: err}
 				return
 			}
+			events <- AgentEvent{Type: AgentEventMessageEnd}
 			a.modelSel.recordSuccess()
 
-			if shouldRecoverMaxTokens(usage.StopReason, toolCalls, a.maxTokensRecovery, attempt) {
+			if shouldRecoverMaxTokens(resp.StopReason, resp.ToolCalls, a.maxTokensRecovery, attempt) {
 				defaults := a.maxTokensRecovery.withDefaults()
 				turnMaxTokens = defaults.nextMaxTokens(turnMaxTokens)
 				continue
@@ -377,21 +399,18 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 			break
 		}
 
-		// Accumulate token usage
-		totalInputTokens += usage.InputTokens
-		totalOutputTokens += usage.OutputTokens
-		totalCacheCreation += usage.CacheCreationInputTokens
-		totalCacheRead += usage.CacheReadInputTokens
+		totalInputTokens += resp.Usage.InputTokens
+		totalOutputTokens += resp.Usage.OutputTokens
+		totalCacheCreation += resp.Usage.CacheCreationInputTokens
+		totalCacheRead += resp.Usage.CacheReadInputTokens
 
-		// Record token usage and check budget
-		if err := budget.record(usage.InputTokens, usage.OutputTokens, 0); err != nil {
+		if err := budget.record(resp.Usage.InputTokens, resp.Usage.OutputTokens, 0); err != nil {
 			events <- AgentEvent{Type: AgentEventError, Error: err}
 			return
 		}
 
-		// No tool calls = done
-		if len(toolCalls) == 0 {
-			stopReason := usage.StopReason
+		if len(resp.ToolCalls) == 0 {
+			stopReason := resp.StopReason
 			if stopReason == "" {
 				stopReason = "end_turn"
 			}
@@ -402,26 +421,26 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 			return
 		}
 
-		// Add assistant message to full history
-		messages = append(messages, anthropic.NewAssistantMessage(assistantBlocks...))
+		// Append assistant message with tool calls to history.
+		history = append(history, ChatMessage{
+			Role:      ChatRoleAssistant,
+			Content:   resp.Content,
+			ToolCalls: resp.ToolCalls,
+		})
 
-		// Execute tools
-		toolResults := a.executeTools(ctx, toolCalls, events)
+		toolResults := a.executeTools(ctx, resp.ToolCalls, events)
 
-		// Emit todos update if write_todos succeeded this turn
-		emitTodoEvents(a.todoStore, toolCalls, toolResults, events)
+		emitTodoEvents(a.todoStore, resp.ToolCalls, toolResults, events)
 
-		// Update lastQuery from tool results so context builder can adapt per turn.
-		// Use the concatenation of tool result content as the next query context.
 		var resultContext string
-		var resultBlocks []anthropic.ContentBlockParamUnion
 		var injectedMessages []ConversationMessage
 		for _, tr := range toolResults {
-			resultBlocks = append(resultBlocks, anthropic.NewToolResultBlock(
-				tr.ToolUseID,
-				tr.Content,
-				tr.IsError,
-			))
+			history = append(history, ChatMessage{
+				Role:       ChatRoleTool,
+				Content:    tr.Content,
+				ToolCallID: tr.ToolUseID,
+				IsError:    tr.IsError,
+			})
 			if !tr.IsError && tr.Content != "" {
 				resultContext += tr.Content + " "
 			}
@@ -433,23 +452,20 @@ func (a *APIAgent) runLoop(ctx context.Context, prompt string, events chan<- Age
 			lastQuery = resultContext
 		}
 
-		messages = append(messages, anthropic.NewUserMessage(resultBlocks...))
-
-		// Inject any metadata messages from structured tool handlers
+		// Inject any metadata messages from structured tool handlers.
 		for _, msg := range injectedMessages {
 			switch msg.Role {
 			case "user":
-				messages = append(messages, anthropic.NewUserMessage(anthropic.NewTextBlock(msg.Content)))
+				history = append(history, ChatMessage{Role: ChatRoleUser, Content: msg.Content})
 			case "assistant":
-				messages = append(messages, anthropic.NewAssistantMessage(anthropic.NewTextBlock(msg.Content)))
+				history = append(history, ChatMessage{Role: ChatRoleAssistant, Content: msg.Content})
 			}
 		}
 
-		// Record turn metrics and emit with AgentEventTurnComplete
 		var tm *TurnMetrics
 		if a.metrics != nil {
-			toolNames := make([]string, len(toolCalls))
-			for i, tc := range toolCalls {
+			toolNames := make([]string, len(resp.ToolCalls))
+			for i, tc := range resp.ToolCalls {
 				toolNames[i] = tc.Name
 			}
 			recorded := TurnMetrics{
@@ -488,192 +504,75 @@ func buildAPIResult(numTurns int, stopReason string, inputTokens, outputTokens, 
 	}
 }
 
-func (a *APIAgent) buildToolsForQuery(ctx context.Context, query string, events chan<- AgentEvent) []anthropic.ToolUnionParam {
+// selectTools returns the tool definitions to send on a given turn.
+// When a ContextBuilder is configured it does semantic selection; otherwise all tools.
+func (a *APIAgent) selectTools(ctx context.Context, query string, events chan<- AgentEvent) []ToolDefinition {
 	if a.tools == nil {
 		return nil
 	}
-
-	var defs []ToolDefinition
 	if a.contextBuilder != nil && query != "" {
-		defs = a.contextBuilder.SelectTools(ctx, query)
+		defs := a.contextBuilder.SelectTools(ctx, query)
 		events <- AgentEvent{
 			Type:    AgentEventSkillsSelected,
 			Content: fmt.Sprintf("selected %d tools for query", len(defs)),
 		}
-	} else {
-		defs = a.tools.Definitions()
+		return defs
 	}
-
-	tools := make([]anthropic.ToolUnionParam, 0, len(defs))
-	for _, def := range defs {
-		tools = append(tools, anthropic.ToolUnionParam{
-			OfTool: &anthropic.ToolParam{
-				Name:        def.Name,
-				Description: anthropic.String(def.Description),
-				InputSchema: anthropic.ToolInputSchemaParam{
-					Properties: def.InputSchema["properties"],
-					ExtraFields: map[string]any{
-						"type":     "object",
-						"required": def.InputSchema["required"],
-					},
-				},
-			},
-		})
-	}
-	return tools
+	return a.tools.Definitions()
 }
 
-// apiTurnUsage holds token counts and stop reason from a single streaming turn.
-type apiTurnUsage struct {
-	InputTokens              int
-	OutputTokens             int
-	CacheCreationInputTokens int
-	CacheReadInputTokens     int
-	StopReason               string
-}
-
-func (a *APIAgent) streamTurn(
-	ctx context.Context,
-	messages []anthropic.MessageParam,
-	tools []anthropic.ToolUnionParam,
-	events chan<- AgentEvent,
-	maxTokens int,
-) ([]ToolCall, []anthropic.ContentBlockParamUnion, apiTurnUsage, error) {
-
-	params := anthropic.MessageNewParams{
-		Model:     anthropic.Model(a.modelSel.currentModel()),
-		MaxTokens: int64(maxTokens),
-		Messages:  messages,
+// compactChatHistory trims history for the LLM using HistoryConfig.
+// The full history is unchanged; only the slice sent to the provider is shortened.
+func compactChatHistory(ctx context.Context, history []ChatMessage, cfg *HistoryConfig) []ChatMessage {
+	if cfg == nil || cfg.MaxTurns == 0 {
+		return history
 	}
-
-	if len(a.systemBlocks) > 0 {
-		blocks := make([]anthropic.TextBlockParam, len(a.systemBlocks))
-		for i, b := range a.systemBlocks {
-			blocks[i] = anthropic.TextBlockParam{Text: b.Text}
-			if b.CacheControl != nil {
-				blocks[i].CacheControl = anthropic.CacheControlEphemeralParam{}
+	if len(history) <= 1 {
+		return history
+	}
+	rest := history[1:]
+	// Each turn = 1 assistant message + N tool result messages.
+	// Count assistant messages as a proxy for turns.
+	var turns int
+	var cutIdx int
+	for i := len(rest) - 1; i >= 0; i-- {
+		if rest[i].Role == ChatRoleAssistant {
+			turns++
+			if turns == cfg.MaxTurns {
+				cutIdx = i
+				break
 			}
 		}
-		params.System = blocks
-	} else if a.system != "" {
-		params.System = []anthropic.TextBlockParam{
-			{Text: a.system},
+	}
+	if turns < cfg.MaxTurns {
+		return history
+	}
+
+	// Optionally summarize dropped messages.
+	dropped := history[1 : cutIdx+1]
+	if cfg.Summarizer != nil && len(dropped) > cfg.SummarizeThreshold {
+		// Convert ChatMessages to ConversationMessages for the summarizer.
+		conv := make([]ConversationMessage, 0, len(dropped))
+		for _, m := range dropped {
+			conv = append(conv, ConversationMessage{
+				Role:    string(m.Role),
+				Content: m.Content,
+			})
 		}
-	}
-
-	if len(tools) > 0 {
-		params.Tools = tools
-	}
-
-	// Use streaming
-	stream := a.client.Messages.NewStreaming(ctx, params)
-
-	events <- AgentEvent{Type: AgentEventMessageStart}
-
-	var (
-		toolCalls       []ToolCall
-		assistantBlocks []anthropic.ContentBlockParamUnion
-		currentText     string
-		currentToolID   string
-		currentToolName string
-		currentToolJSON string
-		usage           apiTurnUsage
-	)
-
-	for stream.Next() {
-		event := stream.Current()
-
-		switch e := event.AsAny().(type) {
-		case anthropic.ContentBlockStartEvent:
-			switch cb := e.ContentBlock.AsAny().(type) {
-			case anthropic.TextBlock:
-				currentText = cb.Text
-			case anthropic.ToolUseBlock:
-				currentToolID = cb.ID
-				currentToolName = cb.Name
-				currentToolJSON = ""
-				events <- AgentEvent{
-					Type: AgentEventToolUseStart,
-					ToolCall: &ToolCall{
-						ID:   cb.ID,
-						Name: cb.Name,
-					},
-				}
-			}
-
-		case anthropic.ContentBlockDeltaEvent:
-			switch d := e.Delta.AsAny().(type) {
-			case anthropic.TextDelta:
-				currentText += d.Text
-				events <- AgentEvent{
-					Type:    AgentEventContentDelta,
-					Content: d.Text,
-				}
-			case anthropic.InputJSONDelta:
-				currentToolJSON += d.PartialJSON
-				events <- AgentEvent{
-					Type:    AgentEventToolUseDelta,
-					Content: d.PartialJSON,
-				}
-			}
-
-		case anthropic.ContentBlockStopEvent:
-			if currentToolID != "" {
-				// Finished a tool use block
-				tc := ToolCall{
-					ID:    currentToolID,
-					Name:  currentToolName,
-					Input: json.RawMessage(currentToolJSON),
-				}
-				toolCalls = append(toolCalls, tc)
-				var inputData any
-				_ = json.Unmarshal([]byte(currentToolJSON), &inputData)
-				assistantBlocks = append(assistantBlocks, anthropic.NewToolUseBlock(
-					currentToolID, inputData, currentToolName,
-				))
-				events <- AgentEvent{
-					Type:     AgentEventToolUseEnd,
-					ToolCall: &tc,
-				}
-				currentToolID = ""
-				currentToolName = ""
-				currentToolJSON = ""
-			} else if currentText != "" {
-				// Finished a text block
-				assistantBlocks = append(assistantBlocks, anthropic.NewTextBlock(currentText))
-				currentText = ""
-			}
-
-		case anthropic.MessageStartEvent:
-			usage.InputTokens = int(e.Message.Usage.InputTokens)
-			usage.CacheCreationInputTokens = int(e.Message.Usage.CacheCreationInputTokens)
-			usage.CacheReadInputTokens = int(e.Message.Usage.CacheReadInputTokens)
-
-		case anthropic.MessageDeltaEvent:
-			usage.OutputTokens = int(e.Usage.OutputTokens)
-			usage.StopReason = string(e.Delta.StopReason)
+		if summary, err := cfg.Summarizer(ctx, conv); err == nil && summary != "" {
+			out := make([]ChatMessage, 0, 2+(len(history)-(cutIdx+1)))
+			out = append(out, history[0], ChatMessage{
+				Role:    ChatRoleUser,
+				Content: "[Previous conversation summary]\n" + summary,
+			})
+			return append(out, history[cutIdx+1:]...)
 		}
 	}
 
-	if err := stream.Err(); err != nil {
-		return nil, nil, apiTurnUsage{}, fmt.Errorf("stream error: %w", err)
-	}
-
-	// Check for truncated tool calls: if the stream ended with an open tool
-	// block (no ContentBlockStopEvent received), the output was truncated
-	// mid-tool-call — typically due to max_tokens.
-	if currentToolID != "" {
-		reason := usage.StopReason
-		if reason == "" {
-			reason = "unknown"
-		}
-		return nil, nil, usage, fmt.Errorf(
-			"output truncated: %s reached mid-tool-call (tool: %s)", reason, currentToolName)
-	}
-
-	events <- AgentEvent{Type: AgentEventMessageEnd}
-
-	return toolCalls, assistantBlocks, usage, nil
+	out := make([]ChatMessage, 0, 1+len(rest)-cutIdx)
+	out = append(out, history[0])
+	out = append(out, rest[cutIdx:]...)
+	return out
 }
 
 func (a *APIAgent) executeTools(
