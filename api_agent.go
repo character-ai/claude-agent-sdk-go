@@ -225,7 +225,10 @@ type APIAgentConfig struct {
 
 // NewAPIAgent creates an agent that uses the Anthropic API (or a custom provider).
 func NewAPIAgent(cfg APIAgentConfig) *APIAgent {
-	if cfg.Model == "" {
+	// Only apply the Anthropic default model when no custom provider is given.
+	// When Provider is set, the provider owns its model selection — passing a
+	// hard-coded Anthropic model name to OpenAI/Mistral/etc. will cause a 404.
+	if cfg.Model == "" && cfg.Provider == nil {
 		cfg.Model = "claude-sonnet-4-20250514"
 	}
 	if cfg.MaxTurns == 0 {
