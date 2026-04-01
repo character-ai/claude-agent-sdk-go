@@ -189,8 +189,10 @@ func convertMessagesToAnthropic(msgs []ChatMessage) []anthropic.MessageParam {
 			out = append(out, anthropic.NewUserMessage(
 				anthropic.NewToolResultBlock(m.ToolCallID, m.Content, m.IsError),
 			))
+
+		case ChatRoleSystem:
+			// System prompt is handled separately via params.System — skip here.
 		}
-		// ChatRoleSystem is handled separately via params.System — skip here.
 	}
 	return out
 }
