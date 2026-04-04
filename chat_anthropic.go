@@ -111,6 +111,11 @@ func (p *AnthropicProvider) Complete(ctx context.Context, req ChatRequest, onEve
 
 		case anthropic.ContentBlockStopEvent:
 			if currentToolID != "" {
+				// Default to {} when the model sends no input (e.g. zero-param tools).
+				// The Anthropic API rejects nil/empty input with "Field required".
+				if currentToolJSON == "" {
+					currentToolJSON = "{}"
+				}
 				tc := ToolCall{
 					ID:    currentToolID,
 					Name:  currentToolName,

@@ -418,9 +418,12 @@ func (a *Agent) streamTurn(
 
 		case EventContentBlockStop:
 			if currentToolCall != nil {
-				if currentToolJSON != "" {
-					currentToolCall.Input = json.RawMessage(currentToolJSON)
+				// Default to {} when the model sends no input (e.g. zero-param tools).
+				// The Anthropic API rejects nil/empty input with "Field required".
+				if currentToolJSON == "" {
+					currentToolJSON = "{}"
 				}
+				currentToolCall.Input = json.RawMessage(currentToolJSON)
 				toolCalls = append(toolCalls, *currentToolCall)
 				events <- AgentEvent{
 					Type:     AgentEventToolUseEnd,
