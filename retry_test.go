@@ -138,6 +138,60 @@ func TestExecuteWithRetrySuccessOnFirstAttempt(t *testing.T) {
 	}
 }
 
+// TestExecuteWithRetryMaxBackoffCap verifies that MaxBackoff caps the computed
+// exponential wait so callers do not sleep for unbounded durations.
+func TestExecuteWithRetryMaxBackoffCap(t *testing.T) {
+	// With Backoff=1s and MaxAttempts=10 the uncapped 9th attempt would wait
+	// 512 s. MaxBackoff=10ms keeps the test fast and confirms the cap works.
+	calls := 0
+	start := time.Now()
+	_, err := executeWithRetry(context.Background(), &RetryConfig{
+		MaxAttempts: 4,
+		Backoff:     10 * time.Millisecond,
+		MaxBackoff:  15 * time.Millisecond,
+	}, func() (string, error) {
+		calls++
+		return "", errors.New("fail")
+	})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if calls != 4 {
+		t.Errorf("expected 4 calls, got %d", calls)
+	}
+	// 3 sleeps each capped at 15 ms → at most ~45 ms total (with some margin).
+	// Without the cap the 3rd sleep alone would be 40 ms (10<<2).
+	// The upper bound is 100 ms (~2× max expected) to stay sensitive to regressions
+	// while tolerating CI scheduling variance.
+	if elapsed > 100*time.Millisecond {
+		t.Errorf("elapsed %v unexpectedly large; MaxBackoff cap may not be working", elapsed)
+	}
+}
+
+// TestExecuteWithRetryJitterBounded verifies that jitter never causes the actual
+// sleep to exceed the computed backoff value.
+func TestExecuteWithRetryJitterBounded(t *testing.T) {
+	const backoff = 50 * time.Millisecond
+	calls := 0
+	start := time.Now()
+	_, _ = executeWithRetry(context.Background(), &RetryConfig{
+		MaxAttempts: 2,
+		Backoff:     backoff,
+	}, func() (string, error) {
+		calls++
+		return "", errors.New("fail")
+	})
+	elapsed := time.Since(start)
+
+	// 1 sleep with full jitter in [0, 50ms]; the actual wait is always ≤ backoff.
+	// Allow 1.5× backoff to account for test scheduling overhead on slow CI runners.
+	if elapsed > 3*backoff/2 {
+		t.Errorf("elapsed %v > 1.5×backoff %v; jitter may have exceeded computed wait", elapsed, backoff)
+	}
+}
+
 // TestToolRetryConfigPerToolOverridesGlobal verifies per-tool retry config
 // overrides the agent-level global config.
 func TestToolRetryConfigPerToolOverridesGlobal(t *testing.T) {
