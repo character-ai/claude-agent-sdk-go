@@ -24,6 +24,13 @@ func executeOneTool(
 
 	// Permission check
 	if canUseTool != nil {
+		if hooks != nil {
+			hooks.EmitEvent(ctx, HookEventData{
+				Event:     HookPermissionRequest,
+				ToolName:  tc.Name,
+				ToolUseID: tc.ID,
+			})
+		}
 		decision := canUseTool(ctx, tc.Name, tc.ID, tc.Input)
 		if !decision.Allow {
 			reason := decision.Reason

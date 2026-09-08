@@ -1,6 +1,7 @@
 package claudeagent
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -36,6 +37,72 @@ func TestParseEventResultUsageAndCost(t *testing.T) {
 	}
 	if event.Result.Usage.CacheReadInputTokens != 6527 {
 		t.Fatalf("expected 6527 cache read tokens, got %d", event.Result.Usage.CacheReadInputTokens)
+	}
+}
+
+func TestParseEventResultExtendedFields(t *testing.T) {
+	c := &Client{}
+	// Captured from a real `claude -p --output-format json` invocation.
+	line := `{"duration_api_ms":3614,"stop_reason":"end_turn","session_id":"0f5fe2d6","total_cost_usd":0.113,"usage":{"input_tokens":6093,"output_tokens":227},"modelUsage":{"auto":{"inputTokens":6093,"outputTokens":227,"costUSD":0.113,"contextWindow":200000,"maxOutputTokens":32000,"canonicalModel":"auto","provider":"firstParty"}},"permission_denials":[],"terminal_reason":"completed","is_error":false,"num_turns":1,"subtype":"success","api_error_status":null,"result":"hi","type":"result","duration_ms":4151,"uuid":"6c826315-a084-4682-bcc4-1feeed3afac0"}`
+	event := c.parseEvent(line)
+
+	if event.Result == nil {
+		t.Fatal("expected result to be non-nil")
+	}
+	if event.Result.TerminalReason != "completed" {
+		t.Fatalf("expected terminal_reason %q, got %q", "completed", event.Result.TerminalReason)
+	}
+	if event.Result.UUID != "6c826315-a084-4682-bcc4-1feeed3afac0" {
+		t.Fatalf("expected uuid to be parsed, got %q", event.Result.UUID)
+	}
+	if event.Result.APIErrorStatus != nil {
+		t.Fatalf("expected nil api_error_status, got %v", *event.Result.APIErrorStatus)
+	}
+	mu, ok := event.Result.ModelUsage["auto"]
+	if !ok {
+		t.Fatalf("expected modelUsage[auto] to be present, got %v", event.Result.ModelUsage)
+	}
+	if mu.CostUSD != 0.113 || mu.ContextWindow != 200000 || mu.Provider != "firstParty" {
+		t.Fatalf("unexpected model usage: %+v", mu)
+	}
+}
+
+func TestParseEventConversationReset(t *testing.T) {
+	c := &Client{}
+	line := `{"type":"conversation_reset","new_conversation_id":"new-conv-1","session_id":"old-sess","uuid":"reset-uuid"}`
+	event := c.parseEvent(line)
+
+	if event.Type != EventConversationReset {
+		t.Fatalf("expected conversation_reset event, got %q", event.Type)
+	}
+	if event.ConversationReset == nil {
+		t.Fatal("expected ConversationReset to be non-nil")
+	}
+	if event.ConversationReset.NewConversationID != "new-conv-1" {
+		t.Fatalf("expected new_conversation_id to be parsed, got %q", event.ConversationReset.NewConversationID)
+	}
+	if event.ConversationReset.SessionID != "old-sess" {
+		t.Fatalf("expected session_id to be parsed, got %q", event.ConversationReset.SessionID)
+	}
+}
+
+func TestParseEventResultErrorPopulatesEventError(t *testing.T) {
+	c := &Client{}
+	line := `{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"sess-1","terminal_reason":"max_turns","errors":["hit turn limit"]}`
+	event := c.parseEvent(line)
+
+	if event.Result == nil || !event.Result.IsError {
+		t.Fatal("expected an error result")
+	}
+	if event.Error == nil {
+		t.Fatal("expected event.Error to be populated for an error result")
+	}
+	re, ok := event.Error.(*ResultError)
+	if !ok {
+		t.Fatalf("expected event.Error to be a *ResultError, got %T", event.Error)
+	}
+	if re.TerminalReason != "max_turns" {
+		t.Fatalf("expected terminal reason 'max_turns', got %q", re.TerminalReason)
 	}
 }
 
@@ -182,9 +249,11 @@ func TestBuildArgsSessionID(t *testing.T) {
 	c := &Client{opts: Options{SessionID: "sess-123"}}
 	args := c.buildArgs()
 
-	idx := indexOf(args, "--continue")
+	// --continue takes no value and resumes the most recent conversation in
+	// Cwd; resuming a specific session ID requires --resume.
+	idx := indexOf(args, "--resume")
 	if idx < 0 || args[idx+1] != "sess-123" {
-		t.Fatalf("expected --continue sess-123, got args: %v", args)
+		t.Fatalf("expected --resume sess-123, got args: %v", args)
 	}
 }
 
@@ -318,6 +387,94 @@ func TestBuildArgsDisallowedTools(t *testing.T) {
 	}
 }
 
+func TestBuildArgsEffort(t *testing.T) {
+	c := &Client{opts: Options{Effort: EffortHigh}}
+	args := c.buildArgs()
+
+	idx := indexOf(args, "--effort")
+	if idx < 0 || args[idx+1] != "high" {
+		t.Fatalf("expected --effort high, got args: %v", args)
+	}
+}
+
+func TestBuildArgsForwardSubagentTextAndHookEvents(t *testing.T) {
+	c := &Client{opts: Options{ForwardSubagentText: true, IncludeHookEvents: true}}
+	args := c.buildArgs()
+
+	if !contains(args, "--forward-subagent-text") {
+		t.Fatal("expected --forward-subagent-text flag")
+	}
+	if !contains(args, "--include-hook-events") {
+		t.Fatal("expected --include-hook-events flag")
+	}
+}
+
+func TestBuildArgsMaxBudgetUSD(t *testing.T) {
+	c := &Client{opts: Options{MaxBudgetUSD: 2.5}}
+	args := c.buildArgs()
+
+	idx := indexOf(args, "--max-budget-usd")
+	if idx < 0 || args[idx+1] != "2.5" {
+		t.Fatalf("expected --max-budget-usd 2.5, got args: %v", args)
+	}
+}
+
+func TestBuildArgsJSONSchema(t *testing.T) {
+	schema := `{"type":"object"}`
+	c := &Client{opts: Options{JSONSchema: schema}}
+	args := c.buildArgs()
+
+	idx := indexOf(args, "--json-schema")
+	if idx < 0 || args[idx+1] != schema {
+		t.Fatalf("expected --json-schema %s, got args: %v", schema, args)
+	}
+}
+
+func TestCommandEnvironmentPropagatesTraceContext(t *testing.T) {
+	t.Setenv("TRACEPARENT", "stale")
+	t.Setenv("TRACESTATE", "stale=1")
+	ctx := WithTraceContext(context.Background(), "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01", "vendor=value")
+	env := commandEnvironment(ctx, nil)
+
+	if value := envValue(env, "TRACEPARENT"); value != "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01" {
+		t.Fatalf("unexpected TRACEPARENT: %q", value)
+	}
+	if value := envValue(env, "TRACESTATE"); value != "vendor=value" {
+		t.Fatalf("unexpected TRACESTATE: %q", value)
+	}
+	if value := envValue(env, "CLAUDE_CODE_ENTRYPOINT"); value != "sdk-go" {
+		t.Fatalf("unexpected entrypoint: %q", value)
+	}
+}
+
+func TestCommandEnvironmentOptionsOverrideTraceContext(t *testing.T) {
+	ctx := WithTraceContext(context.Background(), "propagated", "propagated-state")
+	env := commandEnvironment(ctx, map[string]string{
+		"TRACEPARENT": "explicit",
+		"TRACESTATE":  "explicit-state",
+	})
+
+	if value := envValue(env, "TRACEPARENT"); value != "explicit" {
+		t.Fatalf("explicit TRACEPARENT should win, got %q", value)
+	}
+	if value := envValue(env, "TRACESTATE"); value != "explicit-state" {
+		t.Fatalf("explicit TRACESTATE should win, got %q", value)
+	}
+}
+
+func TestCommandEnvironmentScrubsStaleTraceState(t *testing.T) {
+	t.Setenv("TRACESTATE", "stale=1")
+	ctx := WithTraceContext(context.Background(), "fresh", "")
+	env := commandEnvironment(ctx, nil)
+
+	if value := envValue(env, "TRACEPARENT"); value != "fresh" {
+		t.Fatalf("unexpected TRACEPARENT: %q", value)
+	}
+	if value := envValue(env, "TRACESTATE"); value != "" {
+		t.Fatalf("expected stale TRACESTATE to be removed, got %q", value)
+	}
+}
+
 // --- QueryWithMessages format test ---
 
 func TestQueryWithMessagesFormat(t *testing.T) {
@@ -386,4 +543,14 @@ func indexOf(args []string, s string) int {
 		}
 	}
 	return -1
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, value := range env {
+		if strings.HasPrefix(value, prefix) {
+			return strings.TrimPrefix(value, prefix)
+		}
+	}
+	return ""
 }

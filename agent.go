@@ -379,8 +379,11 @@ func (a *Agent) streamTurn(
 	events <- AgentEvent{Type: AgentEventMessageStart}
 
 	for event := range cliEvents {
+		if event.Result != nil {
+			result = event.Result
+		}
 		if event.Error != nil {
-			return nil, assistantContent, nil, event.Error
+			return toolCalls, assistantContent, result, event.Error
 		}
 
 		switch event.Type { //nolint:exhaustive // Only handling events we care about
