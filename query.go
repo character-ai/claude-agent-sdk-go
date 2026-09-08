@@ -25,28 +25,23 @@ func QuerySync(ctx context.Context, prompt string, opts ...Options) (string, *Re
 	if err != nil {
 		return "", nil, err
 	}
+	return collectQueryEvents(events)
+}
 
+func collectQueryEvents(events <-chan Event) (string, *ResultMessage, error) {
 	var text string
 	var result *ResultMessage
-
 	for event := range events {
-		if event.Error != nil {
-			return text, result, event.Error
-		}
-
-		// Accumulate text from deltas
 		if event.Text != "" {
 			text += event.Text
 		}
-
-		// Capture the final result
 		if event.Result != nil {
 			result = event.Result
 		}
-
-		// Note: text from assistant messages is already captured above via event.Text
+		if event.Error != nil {
+			return text, result, event.Error
+		}
 	}
-
 	return text, result, nil
 }
 
@@ -75,11 +70,11 @@ func QueryWithCallback(ctx context.Context, prompt string, callback StreamCallba
 	}
 
 	for event := range events {
-		if event.Error != nil {
-			return event.Error
-		}
 		if err := callback(event); err != nil {
 			return err
+		}
+		if event.Error != nil {
+			return event.Error
 		}
 	}
 

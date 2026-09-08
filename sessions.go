@@ -101,12 +101,12 @@ func ProjectKeyForDirectory(directory string) (string, error) {
 			return "", err
 		}
 	}
-	canonical, err := filepath.EvalSymlinks(directory)
+	canonical, err := filepath.Abs(directory)
 	if err != nil {
-		canonical, err = filepath.Abs(directory)
-		if err != nil {
-			return "", err
-		}
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(canonical); err == nil {
+		canonical = resolved
 	}
 	return sanitizeSessionProjectKey(canonical), nil
 }
@@ -227,7 +227,7 @@ func ListSessionsFromStore(ctx context.Context, store SessionStore, projectKey s
 		}
 		entries, err := store.Load(ctx, SessionKey{ProjectKey: projectKey, SessionID: item.SessionID})
 		if err != nil {
-			return nil, err
+			continue
 		}
 		info := sessionInfoFromStore(item, entries)
 		if info.Summary != "" {
@@ -404,7 +404,7 @@ func decodeTranscript(r io.Reader) ([]transcriptEntry, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			continue
 		}
-		if entry.Type == "user" || entry.Type == "assistant" || entry.Type == "progress" || entry.Type == "system" || entry.Type == "attachment" || entry.Type == "custom-title" || entry.Type == "tag" || entry.Type == "last-prompt" {
+		if entry.Type == "user" || entry.Type == "assistant" || entry.Type == "progress" || entry.Type == "system" || entry.Type == "attachment" || entry.Type == "custom-title" || entry.Type == "tag" || entry.Type == "last-prompt" || entry.Type == "ai-title" || entry.Type == "summary" {
 			entries = append(entries, entry)
 		}
 	}
@@ -457,8 +457,8 @@ func conversationChain(entries []transcriptEntry) []transcriptEntry {
 					copy := current
 					leaf = &copy
 					bestIndex = index[current.UUID]
+					break
 				}
-				break
 			}
 			parent, ok := byUUID[current.ParentUUID]
 			if !ok {
@@ -556,10 +556,11 @@ func extractMessageText(raw json.RawMessage) string {
 
 func truncateSessionSummary(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
-	if len(value) <= 200 {
+	runes := []rune(value)
+	if len(runes) <= 200 {
 		return value
 	}
-	return strings.TrimSpace(value[:200]) + "…"
+	return strings.TrimSpace(string(runes[:200])) + "…"
 }
 
 func storeTranscriptEntries(entries []SessionStoreEntry) []transcriptEntry {

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -177,6 +179,95 @@ func TestSessionStoreHelpers(t *testing.T) {
 	}
 }
 
+func TestGetSessionMessagesWalksPastMetaLeaf(t *testing.T) {
+	configDir, projectDir := makeSessionProject(t)
+	writeTranscript(t, projectDir, testSessionID, []string{
+		transcriptLine("user", "u1", "", testSessionID, `{"role":"user","content":"hello"}`),
+		transcriptLine("assistant", "a1", "u1", testSessionID, `{"role":"assistant","content":"hi"}`),
+		`{"type":"user","uuid":"meta","parentUuid":"a1","sessionId":"` + testSessionID + `","isMeta":true,"message":{"role":"user","content":"<tick>"}}`,
+	})
+
+	messages, err := GetSessionMessages(testSessionID, SessionMessageOptions{ConfigDir: configDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[0].UUID != "u1" || messages[1].UUID != "a1" {
+		t.Fatalf("expected visible ancestors of the meta leaf, got %+v", messages)
+	}
+}
+
+func TestProjectKeyForDirectoryResolvesRelativePath(t *testing.T) {
+	abs, err := ProjectKeyForDirectory("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := ProjectKeyForDirectory(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel == "-" || rel != abs {
+		t.Fatalf("relative directory should canonicalize to the absolute project key, got %q want %q", rel, abs)
+	}
+}
+
+func TestListSessionsKeepsSummaryAndAITitleRecords(t *testing.T) {
+	configDir, projectDir := makeSessionProject(t)
+	writeTranscript(t, projectDir, testSessionID, []string{
+		`{"type":"ai-title","aiTitle":"Generated title"}`,
+		`{"type":"summary","summary":"Compacted summary"}`,
+	})
+
+	infos, err := ListSessions(SessionListOptions{ConfigDir: configDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("expected one session, got %+v", infos)
+	}
+	if infos[0].CustomTitle != "Generated title" {
+		t.Fatalf("expected AI title, got %+v", infos[0])
+	}
+	if infos[0].Summary != "Generated title" {
+		t.Fatalf("custom/AI title should win the summary, got %+v", infos[0])
+	}
+}
+
+func TestTruncateSessionSummaryPreservesUTF8(t *testing.T) {
+	value := strings.Repeat("你", 201)
+	got := truncateSessionSummary(value)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncated summary is not valid UTF-8: %q", got)
+	}
+	if got != strings.Repeat("你", 200)+"…" {
+		t.Fatalf("unexpected truncation: %q", got)
+	}
+}
+
+func TestListSessionsFromStoreSkipsFailedLoads(t *testing.T) {
+	store := newTestSessionStore()
+	okKey := SessionKey{ProjectKey: "project", SessionID: testSessionID}
+	if err := store.Append(context.Background(), okKey, []SessionStoreEntry{
+		storeEntry(t, transcriptLine("user", "u1", "", testSessionID, `{"role":"user","content":"keep me"}`)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	badKey := SessionKey{ProjectKey: "project", SessionID: testOtherSessionID}
+	if err := store.Append(context.Background(), badKey, []SessionStoreEntry{
+		storeEntry(t, transcriptLine("user", "u2", "", testOtherSessionID, `{"role":"user","content":"broken"}`)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store.failIDs = map[string]error{testOtherSessionID: errors.New("unavailable")}
+
+	infos, err := ListSessionsFromStore(context.Background(), store, "project", SessionListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(infos) != 1 || infos[0].SessionID != testSessionID {
+		t.Fatalf("failed loads should be skipped, got %+v", infos)
+	}
+}
+
 func makeSessionProject(t *testing.T) (string, string) {
 	t.Helper()
 	configDir := t.TempDir()
@@ -218,6 +309,7 @@ func storeEntry(t *testing.T, line string) SessionStoreEntry {
 type testSessionStore struct {
 	entries map[string][]SessionStoreEntry
 	mtimes  map[string]int64
+	failIDs map[string]error
 }
 
 func newTestSessionStore() *testSessionStore {
@@ -240,6 +332,9 @@ func (s *testSessionStore) Append(_ context.Context, key SessionKey, entries []S
 }
 
 func (s *testSessionStore) Load(_ context.Context, key SessionKey) ([]SessionStoreEntry, error) {
+	if err := s.failIDs[key.SessionID]; err != nil {
+		return nil, err
+	}
 	entries, ok := s.entries[storeKey(key)]
 	if !ok {
 		return nil, nil

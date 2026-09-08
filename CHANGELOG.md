@@ -422,6 +422,13 @@ Ported protocol- and API-level additions from the official Python SDK's recent r
 
 ### Fixed
 
+- **`QuerySync` and `Agent.streamTurn` dropped the structured `ResultMessage` on CLI error results.** The new `ResultError` is attached to the same event as `Event.Result`; callers used to return on `Event.Error` first, so cost, usage, and terminal reason were lost and agent budget accounting skipped a billed turn.
+- **`GetSessionMessages` reconstructed an empty conversation when the newest leaf was meta/sidechain/team.** Active-chain walk now continues past ineligible user/assistant records to the latest visible leaf.
+- **Relative `Directory` values such as `"."` produced project key `"-"`.** `ProjectKeyForDirectory` now absolutizes before symlink resolution.
+- **`ai-title` and `summary` transcript records were filtered out**, so AI-generated titles and compacted summaries never reached `SessionInfo`.
+- **Summary truncation could split a UTF-8 rune** at the 200-byte boundary.
+- **One `SessionStore.Load` failure aborted the entire listing**, unlike the filesystem path which skips a bad transcript.
+
 - **`Options.SessionID` did not actually resume a session.** `buildArgs` passed it via `--continue <sessionID>`, but `--continue`/`-c` takes no argument (it resumes the *most recent* conversation in `Cwd`) — the session ID was instead consumed as CLI's positional prompt text, silently discarding the resume and asking Claude to interpret the UUID as a message. Verified against the installed CLI and fixed to use `--resume <sessionID>`, which is the flag that actually accepts a session ID.
 
 ### Changed
