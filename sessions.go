@@ -299,7 +299,7 @@ func sanitizeSessionProjectKey(path string) string {
 func sessionProjectHash(s string) string {
 	var hash int32
 	for _, r := range s {
-		hash = hash*31 + int32(r)
+		hash = hash*31 + r
 	}
 	value := int64(hash)
 	if value < 0 {
@@ -387,11 +387,11 @@ func readSessionsFromDir(projectDir string) ([]SessionInfo, error) {
 }
 
 func readTranscriptEntries(path string) ([]transcriptEntry, error) {
-	file, err := os.Open(path)
+	file, err := os.Open(path) // #nosec G304 -- path is built from the projects dir and a validated session ID
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck
 	return decodeTranscript(file)
 }
 

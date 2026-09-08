@@ -30,11 +30,11 @@ func TestGetSessionMessagesBuildsActiveChain(t *testing.T) {
 	configDir, projectDir := makeSessionProject(t)
 	writeTranscript(t, projectDir, testSessionID, []string{
 		`{"type":"queue-operation","operation":"enqueue"}`,
-		transcriptLine("user", "u1", "", testSessionID, `{"role":"user","content":"root"}`, ""),
-		transcriptLine("assistant", "a1", "u1", testSessionID, `{"role":"assistant","content":[{"type":"text","text":"first"}]}`, ""),
-		transcriptLine("user", "stale", "a1", testSessionID, `{"role":"user","content":"stale branch"}`, ""),
-		transcriptLine("user", "u2", "a1", testSessionID, `{"role":"user","content":"active branch"}`, ""),
-		transcriptLine("assistant", "a2", "u2", testSessionID, `{"role":"assistant","content":[{"type":"text","text":"done"}]}`, ""),
+		transcriptLine("user", "u1", "", testSessionID, `{"role":"user","content":"root"}`),
+		transcriptLine("assistant", "a1", "u1", testSessionID, `{"role":"assistant","content":[{"type":"text","text":"first"}]}`),
+		transcriptLine("user", "stale", "a1", testSessionID, `{"role":"user","content":"stale branch"}`),
+		transcriptLine("user", "u2", "a1", testSessionID, `{"role":"user","content":"active branch"}`),
+		transcriptLine("assistant", "a2", "u2", testSessionID, `{"role":"assistant","content":[{"type":"text","text":"done"}]}`),
 	})
 
 	messages, err := GetSessionMessages(testSessionID, SessionMessageOptions{ConfigDir: configDir})
@@ -52,9 +52,9 @@ func TestGetSessionMessagesBuildsActiveChain(t *testing.T) {
 func TestGetSessionMessagesPaginationAndInvalidID(t *testing.T) {
 	configDir, projectDir := makeSessionProject(t)
 	writeTranscript(t, projectDir, testSessionID, []string{
-		transcriptLine("user", "u1", "", testSessionID, `{"role":"user","content":"one"}`, ""),
-		transcriptLine("assistant", "a1", "u1", testSessionID, `{"role":"assistant","content":"two"}`, ""),
-		transcriptLine("user", "u2", "a1", testSessionID, `{"role":"user","content":"three"}`, ""),
+		transcriptLine("user", "u1", "", testSessionID, `{"role":"user","content":"one"}`),
+		transcriptLine("assistant", "a1", "u1", testSessionID, `{"role":"assistant","content":"two"}`),
+		transcriptLine("user", "u2", "a1", testSessionID, `{"role":"user","content":"three"}`),
 	})
 
 	messages, err := GetSessionMessages(testSessionID, SessionMessageOptions{ConfigDir: configDir, Offset: 1, Limit: 1})
@@ -80,7 +80,7 @@ func TestListSessionsMetadataAndSort(t *testing.T) {
 		`{"type":"tag","tag":"important"}`,
 	})
 	writeTranscript(t, projectDir, testOtherSessionID, []string{
-		transcriptLine("user", "u2", "", testOtherSessionID, `{"role":"user","content":"newer prompt"}`, ""),
+		transcriptLine("user", "u2", "", testOtherSessionID, `{"role":"user","content":"newer prompt"}`),
 	})
 	old := time.Unix(100, 0)
 	newer := time.Unix(200, 0)
@@ -115,7 +115,7 @@ func TestListSessionsMetadataAndSort(t *testing.T) {
 func TestDeleteSessionCascadesToSubagents(t *testing.T) {
 	configDir, projectDir := makeSessionProject(t)
 	writeTranscript(t, projectDir, testSessionID, []string{
-		transcriptLine("user", "u1", "", testSessionID, `{"role":"user","content":"hello"}`, ""),
+		transcriptLine("user", "u1", "", testSessionID, `{"role":"user","content":"hello"}`),
 	})
 	subagent := filepath.Join(projectDir, testSessionID, "subagents", "workflows", "run-1")
 	if err := os.MkdirAll(subagent, 0o755); err != nil {
@@ -140,8 +140,8 @@ func TestSessionStoreHelpers(t *testing.T) {
 	store := newTestSessionStore()
 	key := SessionKey{ProjectKey: "project", SessionID: testSessionID}
 	entries := []SessionStoreEntry{
-		storeEntry(t, transcriptLine("user", "u1", "", testSessionID, `{"role":"user","content":"hello store"}`, "")),
-		storeEntry(t, transcriptLine("assistant", "a1", "u1", testSessionID, `{"role":"assistant","content":"hi"}`, "")),
+		storeEntry(t, transcriptLine("user", "u1", "", testSessionID, `{"role":"user","content":"hello store"}`)),
+		storeEntry(t, transcriptLine("assistant", "a1", "u1", testSessionID, `{"role":"assistant","content":"hi"}`)),
 	}
 	if err := store.Append(context.Background(), key, entries); err != nil {
 		t.Fatal(err)
@@ -198,12 +198,12 @@ func writeTranscript(t *testing.T, projectDir, sessionID string, lines []string)
 	}
 }
 
-func transcriptLine(typ, uuid, parent, sessionID, message, extra string) string {
+func transcriptLine(typ, uuid, parent, sessionID, message string) string {
 	parentJSON := "null"
 	if parent != "" {
 		parentJSON = `"` + parent + `"`
 	}
-	return `{"type":"` + typ + `","uuid":"` + uuid + `","parentUuid":` + parentJSON + `,"sessionId":"` + sessionID + `","message":` + message + extra + `}`
+	return `{"type":"` + typ + `","uuid":"` + uuid + `","parentUuid":` + parentJSON + `,"sessionId":"` + sessionID + `","message":` + message + `}`
 }
 
 func storeEntry(t *testing.T, line string) SessionStoreEntry {
