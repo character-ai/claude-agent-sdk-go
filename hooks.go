@@ -26,6 +26,10 @@ const (
 	HookSubagentStop HookEvent = "SubagentStop"
 	// HookNotification is called for general notifications.
 	HookNotification HookEvent = "Notification"
+	// HookPermissionRequest is called when a tool call needs a permission
+	// decision (i.e. a CanUseToolFunc is about to be invoked), before the
+	// decision is known.
+	HookPermissionRequest HookEvent = "PermissionRequest"
 	// HookSessionStart is called when a session begins.
 	HookSessionStart HookEvent = "SessionStart"
 	// HookSessionEnd is called when a session ends.

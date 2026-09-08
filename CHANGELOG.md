@@ -402,6 +402,28 @@ claude.RegisterToolSearchTool(tools, deferred)
 New types: `DeferredTool`, `DeferredToolLoader`, `DeferredToolRegistry`.
 New function: `RegisterToolSearchTool`.
 
+#### Sync with `claude-agent-sdk-python`
+
+Ported protocol- and API-level additions from the official Python SDK's recent releases (see its CHANGELOG), grounded against the installed CLI (`claude` 2.1.263)'s actual `--help` and `result` JSON output rather than assumed from prose:
+
+- `ResultMessage` gains `TerminalReason`, `ModelUsage map[string]ModelUsage`, `PermissionDenials`, `DeferredToolUse *DeferredToolUse`, `Errors []string`, `APIErrorStatus *int`, `StructuredOutput`, `Origin *MessageOrigin`, `UUID`.
+- New types: `ModelUsage`, `DeferredToolUse`, `MessageOrigin`, `MessageOriginKind` (+ `Origin*` constants), `EffortLevel` (+ `Effort*` constants), `ConversationResetMessage`.
+- `UserMessage` gains `Origin *MessageOrigin`.
+- New `Event.ConversationReset *ConversationResetMessage`, dispatched on the CLI's `conversation_reset` stream event (new `EventConversationReset` constant) — fired after `/clear` or any flow that discards the transcript mid-session.
+- `Options` gains `Effort EffortLevel` (`--effort`), `ForwardSubagentText bool` (`--forward-subagent-text`), `IncludeHookEvents bool` (`--include-hook-events`), `MaxBudgetUSD float64` (`--max-budget-usd`, enforced by the CLI itself, distinct from the existing client-side `BudgetConfig.MaxCostUSD`), `JSONSchema string` (`--json-schema`, paired with the new `ResultMessage.StructuredOutput`).
+- New `HookPermissionRequest` hook event, emitted just before a configured `CanUseToolFunc` is invoked (mirrors the Python SDK's `PermissionRequest` hook).
+- New `ResultError` type (`NewResultError`) carrying a terminal error result's structured payload (`Subtype`, `Errors`, `Result`, `APIErrorStatus`, `TerminalReason`, `SessionID`) — `Event.Error` is now populated with one whenever a `result` frame has `IsError: true`.
+- Session history APIs grounded in Claude Code's actual `CLAUDE_CONFIG_DIR/projects/<project-key>/<session-id>.jsonl` layout: `ListSessions`, `GetSessionMessages`, and cascading `DeleteSession`, including active-chain reconstruction via `parentUuid`, filtering sidechain/meta/team entries, pagination, `CLAUDE_CONFIG_DIR` support, and nested subagent-directory deletion.
+- Store-backed persistence API: `SessionStore`, `SessionKey`, `SessionStoreEntry`, `SessionStoreListEntry`, `ListSessionsFromStore`, `GetSessionMessagesFromStore`, and `DeleteSessionFromStore`. Adapters preserve opaque CLI transcript records and main-session deletes must cascade to subkeys.
+- New session metadata types/options: `SessionInfo`, `SessionMessage`, `SessionListOptions`, `SessionMessageOptions`, plus `ProjectKeyForDirectory` for CLI-compatible project keys.
+- `Options.Env` now adds or overrides CLI subprocess environment variables. `WithTraceContext` propagates W3C `TRACEPARENT`/`TRACESTATE` from a Go `context.Context`, scrubbing stale inherited trace state while preserving explicit `Options.Env` values.
+
+**Not ported** — `GetMCPStatus()`/`GetContextUsage()` and session-resume truncation (`resume_session_at`/`resume_drops_turn`) in the Python SDK are served over a persistent bidirectional control channel (`--input-format stream-json` + `control_request`/`control_response`) to a long-lived CLI process. This SDK's `Client`/`Agent` instead shell out per `Query()` call and run their own tool loop client-side, so there's no live channel for these to query — adding one is a separate, larger project than a field-for-field port. Likewise `TaskUpdatedMessage` has no equivalent here since this SDK's `Task` tool (`subagent.go`) dispatches subagents synchronously in-process rather than as backgroundable CLI tasks.
+
+### Fixed
+
+- **`Options.SessionID` did not actually resume a session.** `buildArgs` passed it via `--continue <sessionID>`, but `--continue`/`-c` takes no argument (it resumes the *most recent* conversation in `Cwd`) — the session ID was instead consumed as CLI's positional prompt text, silently discarding the resume and asking Claude to interpret the UUID as a message. Verified against the installed CLI and fixed to use `--resume <sessionID>`, which is the flag that actually accepts a session ID.
+
 ### Changed
 
 - `ToolDefinition` gains three new fields: `Annotations *ToolAnnotations`, `ValidateInput ToolValidator`, `CheckPermissions ToolPermissionCheck`. All nil by default.

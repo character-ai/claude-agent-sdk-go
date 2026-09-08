@@ -264,6 +264,63 @@ func TestHooksEventHandler(t *testing.T) {
 	}
 }
 
+func TestExecuteOneToolEmitsPermissionRequest(t *testing.T) {
+	tools := NewToolRegistry()
+	tools.Register(ToolDefinition{
+		Name:        "guarded",
+		Description: "tool behind a permission check",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(_ context.Context, _ json.RawMessage) (string, error) {
+		return "ok", nil
+	})
+
+	var events []HookEventData
+	hooks := NewHooks()
+	hooks.OnEvent(HookPermissionRequest, func(_ context.Context, data HookEventData) {
+		events = append(events, data)
+	})
+
+	canUseTool := func(_ context.Context, _ string, _ string, _ json.RawMessage) PermissionDecision {
+		return PermissionDecision{Allow: true}
+	}
+
+	agentEvents := make(chan AgentEvent, 10)
+	tc := ToolCall{ID: "1", Name: "guarded", Input: json.RawMessage(`{}`)}
+	executeOneTool(context.Background(), tc, tools, hooks, canUseTool, nil, nil, agentEvents)
+
+	if len(events) != 1 {
+		t.Fatalf("expected exactly one PermissionRequest event, got %d", len(events))
+	}
+	if events[0].ToolName != "guarded" || events[0].ToolUseID != "1" {
+		t.Fatalf("unexpected event data: %+v", events[0])
+	}
+}
+
+func TestExecuteOneToolNoPermissionRequestWithoutCanUseTool(t *testing.T) {
+	tools := NewToolRegistry()
+	tools.Register(ToolDefinition{
+		Name:        "open",
+		Description: "tool without a permission callback",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(_ context.Context, _ json.RawMessage) (string, error) {
+		return "ok", nil
+	})
+
+	called := false
+	hooks := NewHooks()
+	hooks.OnEvent(HookPermissionRequest, func(_ context.Context, _ HookEventData) {
+		called = true
+	})
+
+	agentEvents := make(chan AgentEvent, 10)
+	tc := ToolCall{ID: "1", Name: "open", Input: json.RawMessage(`{}`)}
+	executeOneTool(context.Background(), tc, tools, hooks, nil, nil, nil, agentEvents)
+
+	if called {
+		t.Fatal("PermissionRequest should not fire when no CanUseToolFunc is configured")
+	}
+}
+
 func TestHooksEventHandlerNoMatch(t *testing.T) {
 	called := false
 	hooks := NewHooks()

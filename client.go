@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -69,7 +71,9 @@ func (c *Client) buildArgs() []string {
 	}
 
 	if c.opts.SessionID != "" {
-		args = append(args, "--continue", c.opts.SessionID)
+		// --continue takes no value (it resumes the most recent conversation in
+		// Cwd); resuming a specific session ID requires --resume.
+		args = append(args, "--resume", c.opts.SessionID)
 	}
 
 	if c.opts.Tools != nil {
@@ -119,9 +123,76 @@ func (c *Client) buildArgs() []string {
 		args = append(args, "--enable-file-checkpointing")
 	}
 
+	if c.opts.Effort != "" {
+		args = append(args, "--effort", string(c.opts.Effort))
+	}
+
+	if c.opts.ForwardSubagentText {
+		args = append(args, "--forward-subagent-text")
+	}
+
+	if c.opts.IncludeHookEvents {
+		args = append(args, "--include-hook-events")
+	}
+
+	if c.opts.MaxBudgetUSD > 0 {
+		args = append(args, "--max-budget-usd", fmt.Sprintf("%g", c.opts.MaxBudgetUSD))
+	}
+
+	if c.opts.JSONSchema != "" {
+		args = append(args, "--json-schema", c.opts.JSONSchema)
+	}
+
 	args = append(args, c.opts.ExtraArgs...)
 
 	return args
+}
+
+// WithTraceContext returns a child context whose W3C trace headers are passed
+// to the Claude CLI as TRACEPARENT and TRACESTATE. Explicit Options.Env values
+// take precedence. This provides propagation without requiring an OpenTelemetry
+// dependency in the SDK; callers can inject headers from their tracer.
+func WithTraceContext(ctx context.Context, traceparent, tracestate string) context.Context {
+	return context.WithValue(ctx, traceContextKey{}, traceContext{
+		traceparent: traceparent,
+		tracestate:  tracestate,
+	})
+}
+
+type traceContextKey struct{}
+
+type traceContext struct {
+	traceparent string
+	tracestate  string
+}
+
+func commandEnvironment(ctx context.Context, overrides map[string]string) []string {
+	values := make(map[string]string)
+	for _, item := range os.Environ() {
+		key, value, ok := strings.Cut(item, "=")
+		if ok && key != "CLAUDECODE" {
+			values[key] = value
+		}
+	}
+	if propagated, ok := ctx.Value(traceContextKey{}).(traceContext); ok && propagated.traceparent != "" {
+		delete(values, "TRACEPARENT")
+		delete(values, "TRACESTATE")
+		values["TRACEPARENT"] = propagated.traceparent
+		if propagated.tracestate != "" {
+			values["TRACESTATE"] = propagated.tracestate
+		}
+	}
+	for key, value := range overrides {
+		values[key] = value
+	}
+	values["CLAUDE_CODE_ENTRYPOINT"] = "sdk-go"
+
+	env := make([]string, 0, len(values))
+	for key, value := range values {
+		env = append(env, key+"="+value)
+	}
+	sort.Strings(env)
+	return env
 }
 
 // Query sends a prompt and returns a channel of streaming events.
@@ -198,6 +269,9 @@ type Event struct {
 	// For result/completion
 	Result *ResultMessage
 
+	// For mid-session conversation resets (e.g. "/clear")
+	ConversationReset *ConversationResetMessage
+
 	// Parsing error if any
 	Error error
 }
@@ -235,6 +309,7 @@ func (c *Client) runStreaming(ctx context.Context, args []string) (<-chan Event,
 	}
 
 	cmd := exec.CommandContext(ctx, cliPath, args...) // #nosec G204 -- cliPath is intentionally configurable
+	cmd.Env = commandEnvironment(ctx, c.opts.Env)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -421,6 +496,15 @@ func (c *Client) parseEvent(line string) Event {
 				result.OutputTokens = result.Usage.OutputTokens
 			}
 			event.Result = &result
+			if result.IsError {
+				event.Error = NewResultError(&result)
+			}
+		}
+
+	case EventConversationReset:
+		var reset ConversationResetMessage
+		if err := json.Unmarshal([]byte(line), &reset); err == nil {
+			event.ConversationReset = &reset
 		}
 	}
 
